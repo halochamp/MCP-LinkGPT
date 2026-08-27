@@ -1,5 +1,9 @@
 # MCP-LinkGPT
 
+[English](#english) | [ภาษาไทย](#ภาษาไทย)
+
+## English
+
 `MCP-LinkGPT` is a small local MCP server that lets Codex explicitly consult
 ChatGPT Web through a dedicated Chrome profile. Its intended role is a
 **read-only reviewer and senior advisor**: it supplies a second opinion on code,
@@ -292,3 +296,244 @@ codex mcp remove mcp-linkgpt
 
 Restart Codex after registration if the tool list does not refresh in the
 current session.
+
+---
+
+## ภาษาไทย
+
+`MCP-LinkGPT` คือ local MCP server ขนาดเล็กที่ให้ Codex ปรึกษา ChatGPT Web
+ผ่าน Chrome profile เฉพาะ บทบาทของมันคือเป็น reviewer และ senior advisor แบบ
+**อ่านอย่างเดียว** เพื่อให้ความเห็นที่สองเกี่ยวกับโค้ด การทดสอบ การออกแบบ และ
+แนวทางแก้ไข ส่วนการรวบรวมหลักฐาน การตัดสินใจ การแก้โค้ด และการตรวจสอบผลลัพธ์
+ยังเป็นความรับผิดชอบของ Codex
+
+```text
+Codex -> MCP-LinkGPT server -> browser-use/CDP -> ChatGPT Web
+```
+
+โปรเจกต์นี้ไม่ใช้ OpenAI API key ไม่รัน browser LLM ตัวที่สอง และไม่แก้ไข
+`browser-use` การทำงานของ browser เป็นแบบ deterministic และจำกัดอยู่ที่โดเมน
+ChatGPT/OpenAI ที่จำเป็นสำหรับเว็บไซต์และการเข้าสู่ระบบ
+
+ชื่อโปรเจกต์และชื่อ MCP registration คือ `MCP-LinkGPT` / `mcp-linkgpt` ส่วน
+ชื่อ Python ที่ขึ้นต้นด้วย `chatgpt_*` และ environment variables ที่ขึ้นต้นด้วย
+`CODEX_CHATGPT_*` ยังคงเดิมเพื่อความเข้ากันได้ โดยเป็นชื่อของบริการที่เชื่อมต่อ
+ไม่ใช่ชื่อที่แสดงของโปรเจกต์
+
+### เครื่องมือ
+
+- `chatgpt_status()` เปิด browser เฉพาะและรายงานสถานะ `ready`,
+  `login_required`, `challenge` หรือ `loading`
+- `chatgpt_close()` ปิด browser session โดยไม่ส่งหรืออ่านเนื้อหาการสนทนา การ
+  ลงทะเบียน MCP ยังคงอยู่ และการเรียกครั้งถัดไปสามารถเปิด session ใหม่ได้
+- `chatgpt_new_chat()` เปิดบทสนทนา ChatGPT ใหม่
+- `chatgpt_last_response()` อ่านคำตอบล่าสุดที่เสร็จแล้วหรือกำลังประมวลผล โดยไม่
+  ส่ง prompt ใหม่
+- `chatgpt_ask(prompt, new_chat=true, timeout_seconds=600)` ส่ง prompt หนึ่ง
+  รายการ รอจนคำตอบหยุดเปลี่ยน และคืนข้อความคำตอบ
+
+มีเพียงหนึ่ง process เท่านั้นที่เป็นเจ้าของ profile เฉพาะได้ในเวลาเดียวกัน
+ระบบไม่เขียน prompt หรือ response ลง application logs จะไม่พยายามข้าม CAPTCHA
+หรือหน้าตรวจสอบมนุษย์ bridge จะตรวจ canonical path ของ profile และปฏิเสธ
+profile ที่อยู่ใน repository รวมถึง symlink ที่ชี้เข้ามา ตรวจซ้ำก่อนใช้งาน ต้องมี
+parent directory ที่เป็นของผู้ใช้และไม่เปิดให้ทุกคนเขียนได้ และเปิด lock โดยไม่
+ตาม symlink
+
+bridge ปิด extensions เริ่มต้นของ browser-use และ storage-state watchdog เพราะ
+browser-use 0.12.9 จะคอยอ่าน cookie เมื่อใช้ persistent `user_data_dir` bridge
+ไม่เรียก cookie API และไม่ export browser storage; profile มีไว้ให้ Chrome ใช้
+กับ session ที่ผู้ใช้ลงชื่อเข้าใช้เท่านั้น
+
+ทุก browser operation จะผูกงาน CDP กับ target เดียวและตรวจสอบ ChatGPT origin
+ที่จุด mutation ของ DOM หากผู้ใช้เปลี่ยน tab หรือหน้าเว็บนำทางไปที่อื่น งานจะ
+หยุดแบบ fail closed หากการเริ่มหรือปิด browser ถูกยกเลิก หรือยืนยันไม่ได้ว่า
+browser หยุดแล้ว bridge จะคง session ownership และ profile lock ไว้ เขียน marker
+`.unclean` และบล็อกการเชื่อมต่อใหม่ การ restart อย่างเดียวไม่ใช่การกู้คืน ต้อง
+ยืนยันก่อนว่า browser หยุดแล้ว ลบ marker ตามชื่อที่ error ระบุ แล้วจึง restart MCP
+process การยกเลิกหลังส่ง prompt แล้วไม่ใช่ rollback ดังนั้น request ถัดไปต้องรอ
+ให้ cleanup ชัดเจน
+
+ก่อนส่ง `chatgpt_ask` จะตรวจว่า composer ที่มองเห็นมี prompt ที่ normalize แล้ว
+ตรงกันทุกตัวอักษรใน runtime evaluation เดียวกับการคลิก Send หลังส่งจะต้องพบ
+user turn ใหม่เพียงหนึ่งรายการ และข้อความล่าสุดต้องตรงกับ prompt ก่อนยอมรับ
+assistant response ใหม่ หากมีการแก้ไขด้วยมือหรือสถานะกำกวม ระบบจะ fail closed
+
+MCP นี้เป็น directional: Codex เรียก ChatGPT Web ได้ แต่ ChatGPT Web เรียกกลับ
+ผ่าน server นี้เพื่ออ่าน path ในเครื่องแบบ arbitrary ไม่ได้ หากผู้ใช้ติดตั้ง
+connector แยก เช่น `ENDEAVOR_AGENT_CHATGPT` นั่นเป็นเส้นทางคนละตัวและมีนโยบาย
+การเข้าถึงของตัวเอง การ review ที่ใช้ connector ดังกล่าวอาจใช้เวลาหลายนาที จึง
+ควรใช้ timeout เริ่มต้น 600 วินาที หรือเพิ่มได้ไม่เกิน 900 วินาทีเมื่อจำเป็น
+
+### ขั้นตอนการ review และให้คำปรึกษา
+
+ใช้เครื่องมือนี้เพื่อขอคำวิจารณ์อิสระ ไม่ใช่เพื่อให้ทำงานแทนแบบ autonomous:
+
+1. Codex อ่านไฟล์ diff ผลทดสอบ และกฎของโปรเจกต์ที่เกี่ยวข้อง
+2. Codex ส่ง prompt ที่มีบริบทจำเป็นไปยัง ChatGPT
+3. ChatGPT ส่ง findings, ความเสี่ยง ทางเลือก หรือคำแนะนำกลับมา
+4. Codex ตรวจสอบ claim ที่สำคัญทุกข้อกับ codebase จริง
+5. Codex แก้เฉพาะสิ่งที่อยู่ในขอบเขต แล้วรันทดสอบและรายงานผล
+
+สำหรับ review อิสระให้เริ่มแชตใหม่ด้วย `new_chat=true` ใช้ `new_chat=false` เฉพาะ
+การถามต่อในหลักฐานชุดเดิม หากหมดเวลาแต่ response ยังทำงานอยู่ ให้เรียก
+`chatgpt_last_response()` แทนการส่ง prompt ซ้ำ
+
+#### สัญญาการ review
+
+ทุก request ที่อาจมีผลต่อการแก้โค้ดต้องแนบสัญญานี้ (คงข้อความภาษาอังกฤษไว้เพื่อ
+ให้ ChatGPT ตีความได้ตรงกัน):
+
+```text
+Act as a read-only code reviewer and advisor. Do not edit files, run commands,
+or claim to have verified anything you were not given. Identify only concrete,
+actionable findings. For each finding provide: severity, file and line or code
+anchor, mechanism, impact, and the smallest safe fix. Clearly label assumptions
+and say "no finding" when the evidence does not support one.
+```
+
+ถ้า ChatGPT มี local connector แยก สัญญา read-only นี้ยังใช้เหมือนเดิม และไม่ควร
+สมมติว่า connector นั้นพร้อมใช้งาน ให้ใส่โค้ดหรือ command output ที่สำคัญลงใน
+prompt เพื่อให้ review ทำซ้ำได้
+
+ตัวอย่างคำขอสำหรับ code review, การตัดสินใจด้าน design และ adversarial sanity
+check อยู่ในส่วนภาษาอังกฤษด้านบน โดยควรใช้ contract เดิมและส่งเฉพาะบริบทที่
+จำเป็น
+
+#### การเรียกเครื่องมือ
+
+ตรวจสอบความพร้อมก่อน review:
+
+```text
+chatgpt_status()
+```
+
+จากนั้นส่ง request ที่มีขอบเขตชัดเจน โดย timeout เริ่มต้นคือ 600 วินาที:
+
+```text
+chatgpt_ask(
+  prompt="<review contract + focused context>",
+  new_chat=true,
+  timeout_seconds=600
+)
+```
+
+ปิด browser เฉพาะหลัง review เสร็จ:
+
+```text
+chatgpt_close()
+```
+
+ใช้ 900 วินาทีเฉพาะ review ที่กว้างเป็นพิเศษ สำหรับคำถามทั่วไปให้ใช้ค่าเริ่มต้น
+หาก timeout แต่ review ยังทำงาน ให้รอสักครู่แล้วเรียก
+`chatgpt_last_response()` timeout ไม่ได้แปลว่า review ล้มเหลว
+
+### การใช้งานและโควตา
+
+bridge นี้ไม่รวมบัญชี API key หรือ context ของ ChatGPT กับ Codex ในการใช้งานปกติ
+คำตอบ reviewer ถูกสร้างในบริบทของ ChatGPT Web และอยู่ภายใต้ข้อจำกัดของบริการ
+นั้น ขณะเดียวกัน Codex ยังใช้ context และ usage ของตัวเองในการสร้าง MCP call และ
+ประมวลผลผลลัพธ์ เส้นทางนี้จึงไม่ใช่ช่องทางฟรีหรือไม่จำกัด
+
+- ChatGPT Web ปกติและงาน Codex เป็น usage surface แยกกันใน workflow นี้ และอยู่
+  ภายใต้ account/plan เดียวกันตามเงื่อนไขของบริการ
+- ChatGPT Work และ Codex ใช้ usage, credits และ limits ร่วมกัน อย่าสมมติว่าแยก
+  กันหาก browser conversation ใช้ Work หรือ agentic feature อื่น
+- token ใน prompt, code excerpt, tool result และ response ยังคงนับใน context ที่
+  ประมวลผล ควรส่งบริบทให้กระชับและกำหนดขอบเขต review
+
+เอกสาร pricing อย่างเป็นทางการอยู่ที่
+<https://learn.chatgpt.com/docs/pricing>
+
+### ความต้องการของระบบ
+
+- macOS ที่ติดตั้ง Google Chrome
+- Python 3.11
+- บัญชี ChatGPT ที่ลงชื่อเข้าใช้ได้ผ่าน browser window ที่มองเห็นได้
+
+environment ที่ผ่านการตรวจสอบ:
+
+```text
+/opt/homebrew/anaconda3/envs/mlx/bin/python3
+browser-use 0.12.9
+mcp 1.26.0
+```
+
+ติดตั้ง dependency ใน Python 3.11 เมื่อจำเป็น:
+
+```bash
+python3.11 -m pip install -r requirements.txt
+```
+
+### การใช้งานครั้งแรก
+
+1. เริ่ม MCP server หรือเรียก `chatgpt_status` จาก Codex
+2. จะมี Chrome window เฉพาะเปิดขึ้นมา โดยใช้
+   `~/.codex-chatgpt/browser-profile`
+3. ลงชื่อเข้าใช้ ChatGPT ด้วยตนเอง ห้ามส่ง credentials ให้ Codex หรือ tool
+4. เรียก `chatgpt_status` อีกครั้งจนสถานะเป็น `ready`
+
+เปลี่ยนตำแหน่ง profile ได้เมื่อจำเป็น:
+
+```bash
+export CODEX_CHATGPT_PROFILE_DIR="$HOME/.codex-chatgpt/browser-profile"
+```
+
+เก็บ profile ไว้นอก repository เสมอ เพราะมี browser state ที่ยืนยันตัวตนแล้ว
+และห้าม commit หรือแชร์
+
+browser จะแสดงให้เห็นเพื่อให้ผู้ใช้ login หรือจัดการ human-verification แต่
+ค่าเริ่มต้นเป็นหน้าต่างขนาดเล็ก (`760x560` ที่ตำแหน่ง `24,60`) แทนการ maximize
+ปรับได้โดยไม่ต้องแก้โค้ด:
+
+```bash
+export CODEX_CHATGPT_WINDOW_WIDTH=900
+export CODEX_CHATGPT_WINDOW_HEIGHT=700
+export CODEX_CHATGPT_WINDOW_X=100
+export CODEX_CHATGPT_WINDOW_Y=120
+```
+
+ค่าตำแหน่งใช้จุดกำเนิดมุมซ้ายบน และส่ง size/position ให้ native headed Chrome
+ของ browser-use หลังเปลี่ยนตัวแปรต้อง restart MCP process
+
+profile path เริ่มต้นและ prefix `CODEX_CHATGPT_*` เป็น runtime identifier แบบ
+legacy ที่คงไว้เพื่อให้ profile และ local setup เดิมใช้งานต่อได้หลังการ rename
+โปรเจกต์
+
+### การทดสอบ
+
+รัน deterministic unit tests และ MCP initialization/list-tools handshake โดยไม่
+เปิด Chrome:
+
+```bash
+/opt/homebrew/anaconda3/envs/mlx/bin/python3 -m unittest discover -s tests -v
+```
+
+หลัง login แล้วอาจทำ live test แบบตั้งใจ เช่น ขอให้ ChatGPT ตอบ `PONG` เท่านั้น
+การเปลี่ยนแปลง UI ของ chatgpt.com อาจทำให้ selector เสีย แม้ unit และ protocol
+tests จะยังผ่าน
+
+bridge ถือว่า `auth.openai.com` เป็น login flow จาก URL และแยก signed-out controls
+ออกจาก conversation content ทั้งนี้ยังขึ้นกับ DOM และ completion signals ที่
+เปลี่ยนแปลงได้ของ ChatGPT Web การยกเลิกหลังส่ง prompt แล้วไม่ใช่ rollback และ
+ChatGPT อาจประมวลผล request ต่อ
+
+### การลงทะเบียนกับ Codex
+
+ลงทะเบียน stdio server โดยแทน path ให้ตรงกับตำแหน่งที่ clone โปรเจกต์:
+
+```bash
+codex mcp add mcp-linkgpt -- \
+  /opt/homebrew/anaconda3/envs/mlx/bin/python3 \
+  /absolute/path/to/MCP-LinkGPT/server.py
+```
+
+ตรวจสอบหรือลบการลงทะเบียน:
+
+```bash
+codex mcp get mcp-linkgpt
+codex mcp remove mcp-linkgpt
+```
+
+หากรายการ tool ยังไม่ refresh ใน session ปัจจุบัน ให้ restart Codex หลังลงทะเบียน
+
+[กลับไปด้านบน / Back to top](#mcp-linkgpt)
