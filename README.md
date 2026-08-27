@@ -23,6 +23,9 @@ they identify the connected service rather than the project display name.
 
 - `chatgpt_status()` opens the dedicated browser and reports `ready`,
   `login_required`, `challenge`, or `loading`.
+- `chatgpt_close()` closes the dedicated browser session without sending or
+  reading conversation content. The MCP registration remains available, and
+  the next browser tool call can start a new session.
 - `chatgpt_new_chat()` opens a fresh ChatGPT conversation.
 - `chatgpt_last_response()` reads the latest completed or in-progress assistant
   response without sending another prompt.
@@ -158,6 +161,12 @@ chatgpt_ask(
   new_chat=true,
   timeout_seconds=600
 )
+```
+
+Close the dedicated browser after the review:
+
+```text
+chatgpt_close()
 ```
 
 Use 900 seconds only for a deliberately broad review. For ordinary questions,

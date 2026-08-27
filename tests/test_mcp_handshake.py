@@ -23,13 +23,24 @@ class MCPHandshakeTests(unittest.IsolatedAsyncioTestCase):
 				initialized = await session.initialize()
 				self.assertEqual(initialized.serverInfo.name, "MCP-LinkGPT")
 				result = await session.list_tools()
-
-		self.assertEqual(
-			{tool.name for tool in result.tools},
-			{"chatgpt_ask", "chatgpt_last_response", "chatgpt_new_chat", "chatgpt_status"},
-		)
-		ask_tool = next(tool for tool in result.tools if tool.name == "chatgpt_ask")
-		self.assertEqual(ask_tool.inputSchema["properties"]["timeout_seconds"]["default"], 600)
+				self.assertEqual(
+					{tool.name for tool in result.tools},
+					{
+						"chatgpt_ask",
+						"chatgpt_close",
+						"chatgpt_last_response",
+						"chatgpt_new_chat",
+						"chatgpt_status",
+					},
+				)
+				close_result = await session.call_tool("chatgpt_close", {})
+				self.assertFalse(close_result.isError)
+				self.assertEqual(
+					close_result.structuredContent,
+					{"ok": True, "status": "closed"},
+				)
+				ask_tool = next(tool for tool in result.tools if tool.name == "chatgpt_ask")
+				self.assertEqual(ask_tool.inputSchema["properties"]["timeout_seconds"]["default"], 600)
 
 
 if __name__ == "__main__":

@@ -58,6 +58,19 @@ async def chatgpt_status() -> dict[str, object]:
 
 
 @mcp.tool()
+async def chatgpt_close() -> dict[str, object]:
+	"""Close the dedicated ChatGPT browser session without sending a prompt."""
+
+	try:
+		await bridge.close()
+		return {"ok": True, "status": "closed"}
+	except ChatGPTWebError as exc:
+		return _error_result(exc)
+	except Exception:
+		return _internal_error_result()
+
+
+@mcp.tool()
 async def chatgpt_new_chat() -> dict[str, object]:
 	"""Navigate the dedicated browser profile to a fresh ChatGPT conversation."""
 
