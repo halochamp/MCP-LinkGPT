@@ -280,7 +280,7 @@ Register the stdio server with absolute paths:
 ```bash
 codex mcp add mcp-linkgpt -- \
   /opt/homebrew/anaconda3/envs/mlx/bin/python3 \
-  /Users/champoomwat/Desktop/ENDEAVOR_AGENTIC/MCP-LinkGPT/server.py
+  /absolute/path/to/MCP-LinkGPT/server.py
 ```
 
 Inspect or remove it with:
