@@ -6,6 +6,7 @@ import asyncio
 import fcntl
 import json
 import os
+import re
 import stat
 import time
 from contextlib import contextmanager, suppress
@@ -654,7 +655,39 @@ class ChatGPTWebBridge:
 
 	@staticmethod
 	def _normalized_text(value: object) -> str:
-		return " ".join(str(value or "").split())
+		"""Canonicalize only observed transport-level newline and NBSP differences."""
+		return str(value or "").replace("\r\n", "\n").replace("\r", "\n").replace("\xa0", " ")
+
+	@classmethod
+	def _normalize_markdown_text(cls, value: object) -> str:
+		"""Normalize only confirmed presentation changes in rendered user turns."""
+		text = str(value or "")
+		lines = text.split("\n")
+		rendered_lines: list[str] = []
+		index = 0
+		while index < len(lines):
+			opener = re.fullmatch(r"(`{3,})([A-Za-z0-9_+.-]*)", lines[index])
+			if opener is None:
+				rendered_lines.append(lines[index])
+				index += 1
+				continue
+			marker, language = opener.groups()
+			try:
+				closer_index = lines.index(marker, index + 1)
+			except ValueError:
+				rendered_lines.append(lines[index])
+				index += 1
+				continue
+			if rendered_lines and rendered_lines[-1] != "":
+				rendered_lines.append("")
+			rendered_lines.append(language)
+			rendered_lines.extend(lines[index + 1 : closer_index])
+			if closer_index + 1 < len(lines) and lines[closer_index + 1] != "":
+				rendered_lines.append("")
+			index = closer_index + 1
+		text = "\n".join(rendered_lines)
+		text = re.sub(r"(?<![\\`])`([^`\n]+)`(?!`)", r"\1", text)
+		return cls._normalized_text(text)
 
 	@staticmethod
 	def _progress_response_tail(response: str) -> str:
@@ -679,13 +712,24 @@ class ChatGPTWebBridge:
 		if current_count < expected_count:
 			return False
 		if current_count != expected_count:
-			raise ChatGPTWebError("The ChatGPT user turn changed during response collection.")
+			raise ChatGPTWebError(
+				"The ChatGPT user turn changed during response collection "
+				f"(reason=count, expected={expected_count}, observed={current_count})."
+			)
 
 		latest_user_text = self._normalized_text(state.get("latest_user_text"))
 		if not latest_user_text:
 			return False
-		if latest_user_text != self._normalized_text(prompt):
-			raise ChatGPTWebError("The ChatGPT user turn changed during response collection.")
+		expected_user_text = self._normalized_text(prompt)
+		if latest_user_text != expected_user_text:
+			exp_md = self._normalize_markdown_text(expected_user_text)
+			obs_md = self._normalize_markdown_text(latest_user_text)
+			if exp_md != obs_md:
+				raise ChatGPTWebError(
+					"The ChatGPT user turn changed during response collection "
+					f"(reason=text, expected_chars={len(expected_user_text)}, "
+					f"observed_chars={len(latest_user_text)})."
+				)
 		return True
 
 	async def _response_page_state(self, prompt: str) -> dict[str, Any] | None:
@@ -727,7 +771,18 @@ class ChatGPTWebBridge:
 			  const assistant = Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'));
 			  const latest = assistant.length ? (assistant[assistant.length - 1].innerText || '').trim() : '';
 			  const user = Array.from(document.querySelectorAll('[data-message-author-role="user"]'));
-			  const latestUser = user.length ? (user[user.length - 1].innerText || '').trim() : '';
+			  const latestUserNode = user.length ? user[user.length - 1] : null;
+			  const latestUserContent = latestUserNode && (
+			    latestUserNode.querySelector('[data-testid="collapsible-user-message-content"]') ||
+			    latestUserNode.querySelector('.whitespace-pre-wrap')
+			  );
+			  // Long user messages gain a visible "Show more" toggle. Reading the
+			  // whole turn would append that control label to the submitted prompt.
+			  // Prefer the message-content node; retain the whole-turn fallback so
+			  // an unknown DOM shape fails closed in the exact-text correlation.
+			  const latestUser = latestUserNode
+			    ? ((latestUserContent || latestUserNode).innerText || '')
+			    : '';
 			  const stop = Array.from(document.querySelectorAll('button[data-testid="stop-button"], button[aria-label]')).some((button) => {
 			    const label = (button.getAttribute('aria-label') || '').trim().toLowerCase();
 			    const testId = (button.getAttribute('data-testid') || '').trim().toLowerCase();
@@ -889,14 +944,28 @@ class ChatGPTWebBridge:
 				(() => {{
 				  {self._mutation_guard_js(expected_identity)}
 				  const expectedPrompt = {json.dumps(prompt)};
-				  const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+				  const normalize = (value) => String(value || '')
+				    .replace(/\\r\\n?/g, '\\n')
+				    .replace(/\\u00a0/g, ' ');
 				  const composer = document.querySelector(
 				    '#prompt-textarea, textarea[data-testid="prompt-textarea"], div[contenteditable="true"][data-virtualkeyboard="true"]'
 				  );
 				  const visible = (node) => !!node && !!(node.offsetWidth || node.offsetHeight || node.getClientRects().length);
 				  if (!visible(composer)) return false;
-				  const composerValue = composer instanceof HTMLTextAreaElement || composer instanceof HTMLInputElement
-				    ? composer.value : (composer.innerText || composer.textContent || '');
+				  const composerValue = (() => {{
+				    if (composer instanceof HTMLTextAreaElement || composer instanceof HTMLInputElement) {{
+				      return composer.value;
+				    }}
+				    const nodes = Array.from(composer.childNodes);
+				    if (!nodes.length) return '';
+				    const supported = nodes.every((node) =>
+				      node.nodeType === Node.TEXT_NODE ||
+				      (node.nodeType === Node.ELEMENT_NODE && ['P', 'DIV'].includes(node.nodeName))
+				    );
+				    if (!supported) return null;
+				    return nodes.map((node) => node.textContent || '').join('\\n');
+				  }})();
+				  if (composerValue === null) return false;
 				  if (normalize(composerValue) !== normalize(expectedPrompt)) return false;
 				  const selectors = [
 				    'button[data-testid="send-button"]',
@@ -1012,9 +1081,13 @@ class ChatGPTWebBridge:
 		if timeout_seconds < 10 or timeout_seconds > 900:
 			raise ChatGPTWebError("timeout_seconds must be between 10 and 900.")
 
+		reported_progress = 0.0
+
 		async def report(percent: float, message: str) -> None:
+			nonlocal reported_progress
 			if progress is not None:
-				await progress(percent, message)
+				reported_progress = max(reported_progress, percent)
+				await progress(reported_progress, message)
 
 		async with self._lock:
 			with self._operation_scope():
@@ -1067,24 +1140,36 @@ class ChatGPTWebBridge:
 				last_wait_state: str | None = None
 				last_progress_at = started
 				last_reported_tail = ""
+				response_started = False
 				while time.monotonic() < deadline:
 					latest_state = await self._response_page_state(prompt)
 					if latest_state is None:
 						now = time.monotonic()
-						if last_wait_state != "waiting_for_response" or now - last_progress_at >= 15:
-							await report(45, "Question sent. Waiting for ChatGPT to start responding.")
-							last_wait_state = "waiting_for_response"
+						wait_state = "response_temporarily_hidden" if response_started else "waiting_for_response"
+						if last_wait_state != wait_state or now - last_progress_at >= 15:
+							await report(
+								65 if response_started else 45,
+								(
+									"ChatGPT started responding; waiting for the page to expose the response again."
+									if response_started
+									else "Question sent. Waiting for ChatGPT to start responding."
+								),
+							)
+							last_wait_state = wait_state
 							last_progress_at = now
 						await self._sleep(self._poll_interval)
 						continue
 					latest_text = str(latest_state.get("latest_text", "")).strip()
 					is_new = int(latest_state.get("assistant_count", 0)) > before_count
 					is_streaming = bool(latest_state.get("streaming"))
+					response_started = response_started or is_new
 					wait_state = (
 						"generating"
 						if is_new and is_streaming
 						else "finalizing"
 						if is_new
+						else "response_temporarily_hidden"
+						if response_started
 						else "waiting_for_response"
 					)
 					now = time.monotonic()
@@ -1097,13 +1182,21 @@ class ChatGPTWebBridge:
 					if wait_state != last_wait_state or should_report_tail or now - last_progress_at >= 15:
 						message = {
 							"waiting_for_response": "Question sent. Waiting for ChatGPT to start responding.",
+							"response_temporarily_hidden": (
+								"ChatGPT started responding; waiting for the page to expose the response again."
+							),
 							"generating": "ChatGPT is generating its response.",
 							"finalizing": "ChatGPT stopped generating; confirming the final response is stable.",
 						}[wait_state]
 						if response_tail:
 							message = f"{message}\n\nLatest visible response tail:\n{response_tail}"
 						await report(
-							{"waiting_for_response": 45, "generating": 65, "finalizing": 85}[wait_state],
+							{
+								"waiting_for_response": 45,
+								"response_temporarily_hidden": 65,
+								"generating": 65,
+								"finalizing": 85,
+							}[wait_state],
 							message,
 						)
 						last_wait_state = wait_state

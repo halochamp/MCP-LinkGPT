@@ -43,8 +43,11 @@ they identify the connected service rather than the project display name.
   ambiguous non-timeout error.
 - `chatgpt_ask(prompt, new_chat=true, timeout_seconds=600)` sends one prompt,
   reports progress notifications, including a bounded tail of the visible
-  response while it is generating, then returns the confirmed final response
-  with `status: "completed"` and an explicit completion message.
+  response while it is generating. Progress values never decrease; if ChatGPT
+  temporarily hides a response turn after generation started, the bridge keeps
+  the response phase instead of reporting that generation never began. The call
+  then returns the confirmed final response with `status: "completed"` and an
+  explicit completion message.
 
 Only one process can own the dedicated profile at a time. Prompts and responses
 are not written to application logs. CAPTCHA and human-verification pages are
@@ -73,8 +76,12 @@ wait for explicit cleanup.
 Before sending, `chatgpt_ask` verifies the visible composer still contains the
 exact normalized prompt in the same guarded runtime evaluation that clicks Send.
 After sending, it requires exactly one new user turn whose latest text matches
-that prompt before accepting a new assistant response. A manual or otherwise
-ambiguous turn fails closed.
+that prompt before accepting a new assistant response. Normalization changes
+only line endings and ChatGPT's NBSP representation; indentation, repeated
+spaces, tabs, blank lines, and line boundaries remain significant. The only
+additional accepted forms are explicitly observed inline-code and paired
+fenced-code presentation transformations. General fuzzy similarity is never
+ownership evidence. A manual or otherwise ambiguous turn fails closed.
 
 This MCP is directional: Codex can call ChatGPT Web, but ChatGPT Web cannot call
 back through this server to read arbitrary local paths. ChatGPT Web may still
@@ -320,6 +327,19 @@ codex mcp add mcp-linkgpt -- \
   /absolute/path/to/MCP-LinkGPT/server.py
 ```
 
+Codex applies its own per-tool deadline outside MCP-LinkGPT. Because this
+bridge intentionally permits 600-900 second reviews, add this line inside the
+generated `[mcp_servers.mcp-linkgpt]` table in `~/.codex/config.toml`:
+
+```toml
+tool_timeout_sec = 900.0
+```
+
+The host timeout must be at least as long as the largest
+`chatgpt_ask(timeout_seconds=...)` value you intend to use. Restart Codex after
+changing this setting. Otherwise the host can abandon the MCP request while the
+bridge still owns the browser and is waiting for ChatGPT to finish.
+
 Inspect or remove it with:
 
 ```bash
@@ -369,8 +389,10 @@ ChatGPT/OpenAI ที่จำเป็นสำหรับเว็บไซ�
   `chatgpt_ask` timeout อย่างชัดเจน ไม่ใช้หลัง error อื่นที่ระบุเจ้าของ response
   ไม่ได้
 - `chatgpt_ask(prompt, new_chat=true, timeout_seconds=600)` ส่ง prompt หนึ่ง
-  รายการ พร้อมส่ง progress และ tail ของคำตอบที่กำลังสร้าง แล้วคืนคำตอบสุดท้าย
-  ที่ยืนยันว่าเสถียรแล้วพร้อม `status: "completed"`
+  รายการ พร้อมส่ง progress และ tail ของคำตอบที่กำลังสร้าง ค่า progress จะไม่
+  ลดลง หาก ChatGPT ซ่อน response turn ที่เริ่มสร้างแล้วชั่วคราว bridge จะคง
+  สถานะ response ไว้แทนการรายงานว่ายังไม่เริ่มสร้างคำตอบ จากนั้นจึงคืนคำตอบ
+  สุดท้ายที่ยืนยันว่าเสถียรแล้วพร้อม `status: "completed"`
 
 มีเพียงหนึ่ง process เท่านั้นที่เป็นเจ้าของ profile เฉพาะได้ในเวลาเดียวกัน
 ระบบไม่เขียน prompt หรือ response ลง application logs จะไม่พยายามข้าม CAPTCHA
@@ -396,7 +418,11 @@ process การยกเลิกหลังส่ง prompt แล้วไ�
 ก่อนส่ง `chatgpt_ask` จะตรวจว่า composer ที่มองเห็นมี prompt ที่ normalize แล้ว
 ตรงกันทุกตัวอักษรใน runtime evaluation เดียวกับการคลิก Send หลังส่งจะต้องพบ
 user turn ใหม่เพียงหนึ่งรายการ และข้อความล่าสุดต้องตรงกับ prompt ก่อนยอมรับ
-assistant response ใหม่ หากมีการแก้ไขด้วยมือหรือสถานะกำกวม ระบบจะ fail closed
+assistant response ใหม่ การ normalize เปลี่ยนเฉพาะรูปแบบ newline และ NBSP ของ
+ChatGPT เท่านั้น โดย indentation, ช่องว่างซ้ำ, tab, blank line และขอบเขตแต่ละ
+บรรทัดยังมีความหมาย รูปแบบเพิ่มเติมที่ยอมรับมีเฉพาะการแสดงผล inline code และ
+paired fenced code ที่ตรวจยืนยันแล้วเท่านั้น ระบบไม่ใช้ fuzzy similarity เป็น
+หลักฐาน ownership หากมีการแก้ไขด้วยมือหรือสถานะกำกวม ระบบจะ fail closed
 
 MCP นี้เป็น directional: Codex เรียก ChatGPT Web ได้ แต่ ChatGPT Web เรียกกลับ
 ผ่าน server นี้เพื่ออ่าน path ในเครื่องแบบ arbitrary ไม่ได้ หากผู้ใช้ติดตั้ง
@@ -586,6 +612,18 @@ codex mcp add mcp-linkgpt -- \
   /opt/homebrew/anaconda3/envs/mlx/bin/python3 \
   /absolute/path/to/MCP-LinkGPT/server.py
 ```
+
+Codex มี timeout ของ Tool แยกจาก MCP-LinkGPT เนื่องจาก bridge รองรับการ review
+ที่ใช้เวลา 600-900 วินาที ให้เพิ่มบรรทัดนี้ในตาราง
+`[mcp_servers.mcp-linkgpt]` ที่สร้างใน `~/.codex/config.toml`:
+
+```toml
+tool_timeout_sec = 900.0
+```
+
+timeout ฝั่ง host ต้องไม่น้อยกว่าค่า `chatgpt_ask(timeout_seconds=...)` สูงสุดที่
+จะใช้ และต้อง restart Codex หลังแก้ค่า มิฉะนั้น host อาจตัด MCP request ขณะที่
+bridge ยังถือ browser อยู่และรอ ChatGPT ทำงานให้เสร็จ
 
 ตรวจสอบหรือลบการลงทะเบียน:
 

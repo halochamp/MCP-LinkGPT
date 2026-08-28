@@ -124,7 +124,8 @@ async def chatgpt_ask(
 
 	Use after chatgpt_status returns ``ready``. Do not send another prompt or call
 	another browser tool while waiting. Progress notifications and response tails
-	are context, not final advice. Accept only ``ok=true`` with
+	are context, not final advice; progress values do not decrease when ChatGPT
+	temporarily hides an already-started response turn. Accept only ``ok=true`` with
 	``status="completed"``. After a timeout, recover with chatgpt_last_response
 	without resending. After any
 	ambiguous non-timeout error, discard partial output and do not retry; a new
@@ -133,7 +134,8 @@ async def chatgpt_ask(
 	Args:
 		prompt: Text to send. Content is not written to logs.
 		new_chat: Start from a fresh conversation before sending.
-		timeout_seconds: Response timeout from 10 to 900 seconds. Local connector work may take several minutes.
+		timeout_seconds: Response timeout from 10 to 900 seconds. The host MCP tool
+			timeout must be no shorter; local connector work may take several minutes.
 	"""
 
 	try:

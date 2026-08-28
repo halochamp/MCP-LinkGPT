@@ -94,6 +94,26 @@ class ChatGPTWebBridgeTests(unittest.IsolatedAsyncioTestCase):
 		self.assertNotIn("bodyText.includes('ตรวจสอบว่าคุณเป็นมนุษย์')", bridge.expression)
 		self.assertIn('iframe[src*="challenge"]', bridge.expression)
 
+	async def test_page_state_excludes_collapsible_user_turn_toggle_text(self) -> None:
+		class CapturingBridge(ChatGPTWebBridge):
+			def __init__(self) -> None:
+				super().__init__(profile_dir=Path("/tmp/mcp-linkgpt-capture-profile"))
+				self.expression = ""
+
+			async def _evaluate(self, expression: str) -> dict[str, Any]:
+				self.expression = expression
+				return state()
+
+		bridge = CapturingBridge()
+		await bridge._page_state()
+
+		content_selector = '[data-testid="collapsible-user-message-content"]'
+		self.assertIn(content_selector, bridge.expression)
+		self.assertLess(
+			bridge.expression.index(content_selector),
+			bridge.expression.index("latestUserContent || latestUserNode"),
+		)
+
 	async def test_existing_assistant_text_change_is_not_a_new_turn(self) -> None:
 		bridge = ScriptedBridge(
 			[
@@ -795,6 +815,9 @@ class ChatGPTWebBridgeTests(unittest.IsolatedAsyncioTestCase):
 		self.assertNotIn("Input.insertText", "\n".join(expressions))
 		self.assertIn("expectedPrompt", expressions[-1])
 		self.assertIn("composerValue", expressions[-1])
+		self.assertIn("composer.childNodes", expressions[-1])
+		self.assertIn(".join('\\n')", expressions[-1])
+		self.assertNotIn("replace(/\\s+/g", expressions[-1])
 
 	async def test_same_target_page_identity_change_fails_closed(self) -> None:
 		class IdentityChangingBridge(ScriptedBridge):
@@ -1067,6 +1090,40 @@ class ChatGPTWebBridgeTests(unittest.IsolatedAsyncioTestCase):
 		)
 		self.assertEqual(progress_events[-1], (100, "ChatGPT has finished and the final response is ready."))
 
+	async def test_progress_does_not_regress_when_response_turn_is_temporarily_hidden(self) -> None:
+		progress_events: list[tuple[float, str]] = []
+
+		async def report(progress: float, message: str) -> None:
+			progress_events.append((progress, message))
+
+		bridge = ScriptedBridge(
+			[
+				state(),
+				state(
+					assistant_count=1,
+					latest_text="Thinking",
+					streaming=True,
+					user_count=1,
+					latest_user_text="prompt",
+				),
+				state(),
+				state(user_count=1, latest_user_text="prompt"),
+				state(assistant_count=1, latest_text="answer", user_count=1, latest_user_text="prompt"),
+				state(assistant_count=1, latest_text="answer", user_count=1, latest_user_text="prompt"),
+				state(assistant_count=1, latest_text="answer", user_count=1, latest_user_text="prompt"),
+			]
+		)
+
+		result = await bridge.ask("prompt", new_chat=False, timeout_seconds=10, progress=report)
+
+		self.assertEqual(result["response"], "answer")
+		progress_values = [value for value, _ in progress_events]
+		self.assertEqual(progress_values, sorted(progress_values))
+		self.assertIn(
+			(65, "ChatGPT started responding; waiting for the page to expose the response again."),
+			progress_events,
+		)
+
 	def test_progress_response_tail_is_bounded_to_recent_content(self) -> None:
 		response = "a" * 20 + "last context"
 		with patch("chatgpt_web.MAX_PROGRESS_TAIL_CHARS", 12):
@@ -1162,7 +1219,23 @@ class ChatGPTWebBridgeTests(unittest.IsolatedAsyncioTestCase):
 			]
 		)
 
-		with self.assertRaisesRegex(ChatGPTWebError, "user turn changed"):
+		with self.assertRaisesRegex(ChatGPTWebError, r"user turn changed.*reason=text"):
+			await bridge.ask("bridge prompt", new_chat=False, timeout_seconds=10)
+
+	async def test_multiple_new_user_turns_report_count_mismatch(self) -> None:
+		bridge = ScriptedBridge(
+			[
+				state(),
+				state(
+					user_count=2,
+					latest_user_text="bridge prompt",
+					assistant_count=1,
+					latest_text="unowned answer",
+				),
+			]
+		)
+
+		with self.assertRaisesRegex(ChatGPTWebError, r"user turn changed.*reason=count"):
 			await bridge.ask("bridge prompt", new_chat=False, timeout_seconds=10)
 
 	async def test_rejects_empty_prompt(self) -> None:
@@ -1182,6 +1255,142 @@ class ChatGPTWebBridgeTests(unittest.IsolatedAsyncioTestCase):
 		self.assertEqual(result["status"], "ready")
 		self.assertNotIn("latest_text", result)
 		self.assertNotIn("secret response", repr(result))
+
+	def test_markdown_normalization_only_applies_confirmed_rendering_changes(self) -> None:
+		self.assertEqual(
+			ChatGPTWebBridge._normalize_markdown_text("Review `_profile_lock` now."),
+			"Review _profile_lock now.",
+		)
+		self.assertEqual(
+			ChatGPTWebBridge._normalize_markdown_text("C# a*b x > y # literal"),
+			"C# a*b x > y # literal",
+		)
+		self.assertEqual(
+			ChatGPTWebBridge._normalize_markdown_text("unmatched `backtick"),
+			"unmatched `backtick",
+		)
+		fenced = "before\n```python\nx = 1\nprint(x)\n```\nafter"
+		rendered = "before\n\npython\nx = 1\nprint(x)\n\nafter"
+		self.assertEqual(ChatGPTWebBridge._normalize_markdown_text(fenced), rendered)
+		self.assertEqual(
+			ChatGPTWebBridge._normalize_markdown_text("before\n```python\nx = 1\nafter"),
+			"before\n```python\nx = 1\nafter",
+		)
+		self.assertNotEqual(
+			ChatGPTWebBridge._normalize_markdown_text(fenced),
+			ChatGPTWebBridge._normalize_markdown_text(rendered.replace("x = 1", "x = 2")),
+		)
+
+	def test_text_normalization_preserves_semantic_whitespace(self) -> None:
+		self.assertEqual(
+			ChatGPTWebBridge._normalized_text("line 1\r\n\xa0 \xa0 line 2\rline 3"),
+			"line 1\n    line 2\nline 3",
+		)
+		self.assertNotEqual(
+			ChatGPTWebBridge._normalized_text("if authorized:\n    delete_files()"),
+			ChatGPTWebBridge._normalized_text("if authorized:\ndelete_files()"),
+		)
+		self.assertNotEqual(
+			ChatGPTWebBridge._normalized_text('value = "a  b"'),
+			ChatGPTWebBridge._normalized_text('value = "a b"'),
+		)
+		self.assertNotEqual(
+			ChatGPTWebBridge._normalized_text("ALLOW\nDENY"),
+			ChatGPTWebBridge._normalized_text("ALLOW DENY"),
+		)
+
+	async def test_user_turn_rejects_semantic_whitespace_changes(self) -> None:
+		cases = [
+			("if authorized:\n    delete_files()", "if authorized:\ndelete_files()"),
+			('value = "a  b"', 'value = "a b"'),
+			("ALLOW\nDENY", "ALLOW DENY"),
+		]
+		for raw_prompt, rendered_text in cases:
+			with self.subTest(raw_prompt=raw_prompt):
+				bridge = ScriptedBridge(
+					[
+						state(),
+						state(
+							user_count=1,
+							latest_user_text=rendered_text,
+							assistant_count=1,
+							latest_text="unowned",
+						),
+					]
+				)
+				with self.assertRaisesRegex(ChatGPTWebError, r"user turn changed.*reason=text"):
+					await bridge.ask(raw_prompt, new_chat=False, timeout_seconds=10)
+
+	async def test_user_turn_accepts_inline_code_rendered_text(self) -> None:
+		raw_prompt = "Review `_profile_lock` and `chatgpt_status()` with high priority."
+		rendered_text = "Review _profile_lock and chatgpt_status() with high priority."
+		bridge = ScriptedBridge(
+			[
+				state(),
+				state(
+					user_count=1,
+					latest_user_text=rendered_text,
+					assistant_count=1,
+					latest_text="reviewed",
+					stop_visible=False,
+				),
+			]
+		)
+		result = await bridge.ask(raw_prompt, new_chat=False, timeout_seconds=10)
+		self.assertEqual(result["response"], "reviewed")
+
+	async def test_user_turn_accepts_fenced_code_rendered_text(self) -> None:
+		raw_prompt = "before\n```python\nx = 1\nprint(x)\n```\nafter"
+		rendered_text = "before\n\npython\nx = 1\nprint(x)\n\nafter"
+		bridge = ScriptedBridge(
+			[
+				state(),
+				state(
+					user_count=1,
+					latest_user_text=rendered_text,
+					assistant_count=1,
+					latest_text="reviewed",
+					stop_visible=False,
+				),
+			]
+		)
+		result = await bridge.ask(raw_prompt, new_chat=False, timeout_seconds=10)
+		self.assertEqual(result["response"], "reviewed")
+
+	async def test_user_turn_rejects_high_similarity_semantic_change(self) -> None:
+		raw_prompt = ("Review this safety policy carefully. " * 80) + "DO NOT DELETE FILES."
+		rendered_text = ("Review this safety policy carefully. " * 80) + "DELETE FILES."
+		bridge = ScriptedBridge(
+			[
+				state(),
+				state(
+					user_count=1,
+					latest_user_text=rendered_text,
+					assistant_count=1,
+					latest_text="unowned",
+					stop_visible=False,
+				),
+			]
+		)
+		with self.assertRaisesRegex(ChatGPTWebError, r"user turn changed.*reason=text"):
+			await bridge.ask(raw_prompt, new_chat=False, timeout_seconds=10)
+
+	async def test_user_turn_rejects_unrelated_text(self) -> None:
+		raw_prompt = "A" * 100
+		rendered_text = "B" * 100
+		bridge = ScriptedBridge(
+			[
+				state(),
+				state(
+					user_count=1,
+					latest_user_text=rendered_text,
+					assistant_count=1,
+					latest_text="unrelated",
+				),
+			]
+		)
+		with self.assertRaisesRegex(ChatGPTWebError, r"user turn changed.*reason=text"):
+			await bridge.ask(raw_prompt, new_chat=False, timeout_seconds=10)
 
 
 if __name__ == "__main__":
