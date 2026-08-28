@@ -42,6 +42,8 @@ class MCPHandshakeTests(unittest.IsolatedAsyncioTestCase):
 				ask_tool = next(tool for tool in result.tools if tool.name == "chatgpt_ask")
 				self.assertEqual(ask_tool.inputSchema["properties"]["timeout_seconds"]["default"], 600)
 				self.assertIn("do not send another prompt", ask_tool.description.lower())
+				self.assertIn("progress notifications", ask_tool.description.lower())
+				self.assertIn('status="completed"', ask_tool.description)
 				self.assertIn("chatgpt_last_response", ask_tool.description)
 
 

@@ -866,6 +866,11 @@ class ChatGPTWebBridgeTests(unittest.IsolatedAsyncioTestCase):
 		self.assertEqual(captured["window_position"], {"width": 100, "height": 120})
 
 	async def test_ask_returns_stable_completed_response(self) -> None:
+		progress_events: list[tuple[float, str]] = []
+
+		async def report(progress: float, message: str) -> None:
+			progress_events.append((progress, message))
+
 		bridge = ScriptedBridge(
 			[
 				state(),
@@ -882,13 +887,40 @@ class ChatGPTWebBridgeTests(unittest.IsolatedAsyncioTestCase):
 			]
 		)
 
-		result = await bridge.ask("ทดสอบ", timeout_seconds=10)
+		result = await bridge.ask("ทดสอบ", timeout_seconds=10, progress=report)
 
 		self.assertTrue(result["ok"])
+		self.assertEqual(result["status"], "completed")
+		self.assertEqual(result["message"], "ChatGPT has finished and the final response is ready.")
 		self.assertEqual(result["response"], "คำตอบสุดท้าย")
 		self.assertEqual(bridge.inserted, ["ทดสอบ"])
 		self.assertEqual(bridge.submits, 1)
 		self.assertEqual(bridge.navigations, 1)
+		self.assertIn((35, "Question sent. Waiting for ChatGPT to start responding."), progress_events)
+		self.assertIn(
+			(65, "ChatGPT is generating its response.\n\nLatest visible response tail:\nกำลังตอบ"),
+			progress_events,
+		)
+		self.assertEqual(progress_events[-1], (100, "ChatGPT has finished and the final response is ready."))
+
+	def test_progress_response_tail_is_bounded_to_recent_content(self) -> None:
+		response = "a" * 20 + "last context"
+		with patch("chatgpt_web.MAX_PROGRESS_TAIL_CHARS", 12):
+			tail = ChatGPTWebBridge._progress_response_tail(response)
+
+		self.assertEqual(tail, "…last context")
+
+	async def test_last_response_labels_completed_and_in_progress(self) -> None:
+		completed = ScriptedBridge([state(assistant_count=1, latest_text="final")])
+		in_progress = ScriptedBridge([state(assistant_count=1, latest_text="partial", streaming=True)])
+
+		completed_result = await completed.last_response()
+		in_progress_result = await in_progress.last_response()
+
+		self.assertEqual(completed_result["status"], "completed")
+		self.assertEqual(completed_result["message"], "ChatGPT has finished and the final response is ready.")
+		self.assertEqual(in_progress_result["status"], "in_progress")
+		self.assertEqual(in_progress_result["message"], "ChatGPT is still generating a response.")
 
 	async def test_new_chat_transition_is_pinned_to_submitted_prompt(self) -> None:
 		bridge = ScriptedBridge(

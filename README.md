@@ -31,10 +31,12 @@ they identify the connected service rather than the project display name.
   reading conversation content. The MCP registration remains available, and
   the next browser tool call can start a new session.
 - `chatgpt_new_chat()` opens a fresh ChatGPT conversation.
-- `chatgpt_last_response()` reads the latest completed or in-progress assistant
-  response without sending another prompt.
+- `chatgpt_last_response()` reads the latest assistant response without sending
+  another prompt and labels it `in_progress` or `completed`.
 - `chatgpt_ask(prompt, new_chat=true, timeout_seconds=600)` sends one prompt,
-  waits for the response to stop changing, and returns the response text.
+  reports progress notifications, including a bounded tail of the visible
+  response while it is generating, then returns the confirmed final response
+  with `status: "completed"` and an explicit completion message.
 
 Only one process can own the dedicated profile at a time. Prompts and responses
 are not written to application logs. CAPTCHA and human-verification pages are
@@ -88,7 +90,8 @@ The normal hand-off is:
 Start a fresh chat for an independent review (`new_chat=true`). Use
 `new_chat=false` only to ask a narrow follow-up about the same evidence. If the
 response is still running after the timeout, call `chatgpt_last_response()`
-instead of submitting the prompt again.
+instead of submitting the prompt again. Its returned status distinguishes a
+still-running response from a completed one.
 
 ### Review contract
 
@@ -166,6 +169,14 @@ chatgpt_ask(
   timeout_seconds=600
 )
 ```
+
+During the wait, MCP clients that request progress receive lifecycle updates:
+the question was sent, ChatGPT is waiting or generating, or the bridge is
+confirming stability. While generating, an update includes the latest visible
+response tail (up to 1,200 characters); it lets the calling agent understand
+the current context before the final response arrives. Do not make another
+browser call until `chatgpt_ask` returns. A successful result includes
+`status: "completed"` and confirms that the final answer is ready to use.
 
 Close the dedicated browser after the review:
 
@@ -327,10 +338,11 @@ ChatGPT/OpenAI ที่จำเป็นสำหรับเว็บไซ�
 - `chatgpt_close()` ปิด browser session โดยไม่ส่งหรืออ่านเนื้อหาการสนทนา การ
   ลงทะเบียน MCP ยังคงอยู่ และการเรียกครั้งถัดไปสามารถเปิด session ใหม่ได้
 - `chatgpt_new_chat()` เปิดบทสนทนา ChatGPT ใหม่
-- `chatgpt_last_response()` อ่านคำตอบล่าสุดที่เสร็จแล้วหรือกำลังประมวลผล โดยไม่
-  ส่ง prompt ใหม่
+- `chatgpt_last_response()` อ่านคำตอบล่าสุดโดยไม่ส่ง prompt ใหม่ และระบุสถานะ
+  `in_progress` หรือ `completed`
 - `chatgpt_ask(prompt, new_chat=true, timeout_seconds=600)` ส่ง prompt หนึ่ง
-  รายการ รอจนคำตอบหยุดเปลี่ยน และคืนข้อความคำตอบ
+  รายการ พร้อมส่ง progress และ tail ของคำตอบที่กำลังสร้าง แล้วคืนคำตอบสุดท้าย
+  ที่ยืนยันว่าเสถียรแล้วพร้อม `status: "completed"`
 
 มีเพียงหนึ่ง process เท่านั้นที่เป็นเจ้าของ profile เฉพาะได้ในเวลาเดียวกัน
 ระบบไม่เขียน prompt หรือ response ลง application logs จะไม่พยายามข้าม CAPTCHA
@@ -376,7 +388,8 @@ connector แยก เช่น `Endeavor_Hands` นั่นเป็นเส
 
 สำหรับ review อิสระให้เริ่มแชตใหม่ด้วย `new_chat=true` ใช้ `new_chat=false` เฉพาะ
 การถามต่อในหลักฐานชุดเดิม หากหมดเวลาแต่ response ยังทำงานอยู่ ให้เรียก
-`chatgpt_last_response()` แทนการส่ง prompt ซ้ำ
+`chatgpt_last_response()` แทนการส่ง prompt ซ้ำ สถานะที่คืนมาจะบอกว่า response
+ยังทำงานอยู่หรือเสร็จแล้ว
 
 #### สัญญาการ review
 
@@ -416,6 +429,12 @@ chatgpt_ask(
   timeout_seconds=600
 )
 ```
+
+ระหว่างรอ MCP client ที่รองรับ progress จะได้รับสถานะว่า prompt ถูกส่งแล้ว กำลัง
+รอ กำลังสร้างคำตอบ หรือกำลังยืนยันความเสถียร ระหว่างสร้างคำตอบจะมี tail ล่าสุด
+ของข้อความที่มองเห็นได้ (ไม่เกิน 1,200 ตัวอักษร) เพื่อให้ agent เข้าใจบริบท
+ปัจจุบันก่อนคำตอบสุดท้ายมา ห้ามเรียก browser tool อื่นจนกว่า `chatgpt_ask` จะคืน
+ผลสำเร็จ ซึ่งจะมี `status: "completed"` และข้อความยืนยันว่าคำตอบสุดท้ายพร้อมใช้
 
 ปิด browser เฉพาะหลัง review เสร็จ:
 

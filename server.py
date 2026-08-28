@@ -10,7 +10,7 @@ from typing import AsyncIterator
 os.environ.setdefault("BROWSER_USE_LOGGING_LEVEL", "critical")
 os.environ.setdefault("BROWSER_USE_SETUP_LOGGING", "false")
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 
 from chatgpt_web import ChatGPTWebBridge, ChatGPTWebError
 
@@ -84,7 +84,7 @@ async def chatgpt_new_chat() -> dict[str, object]:
 
 @mcp.tool()
 async def chatgpt_last_response() -> dict[str, object]:
-	"""Return the latest assistant response without sending another prompt."""
+	"""Return the latest ChatGPT response and whether it is still generating or completed."""
 
 	try:
 		return await bridge.last_response()
@@ -95,12 +95,22 @@ async def chatgpt_last_response() -> dict[str, object]:
 
 
 @mcp.tool()
-async def chatgpt_ask(prompt: str, new_chat: bool = True, timeout_seconds: int = 600) -> dict[str, object]:
+async def chatgpt_ask(
+	prompt: str,
+	new_chat: bool = True,
+	timeout_seconds: int = 600,
+	ctx: Context = None,  # type: ignore[assignment]
+) -> dict[str, object]:
 	"""Send one prompt to ChatGPT Web and return its completed response.
 
 	After the prompt is submitted, wait for this call to complete or time out;
 	do not send another prompt, start a new chat, close the browser, or read the
-	latest response while this call is waiting. A timeout does not mean the
+	latest response while this call is waiting. While the MCP client supports
+	progress notifications, it receives lifecycle updates such as "waiting",
+	"generating", and "finalizing". While ChatGPT generates, updates include a
+	bounded tail of the visible response so the calling agent has current context.
+	On success, this tool returns status="completed" and explicitly confirms that
+	the final response is ready. A timeout does not mean the
 	response failed: call chatgpt_last_response once after a timeout.
 
 	Args:
@@ -110,7 +120,16 @@ async def chatgpt_ask(prompt: str, new_chat: bool = True, timeout_seconds: int =
 	"""
 
 	try:
-		return await bridge.ask(prompt, new_chat=new_chat, timeout_seconds=timeout_seconds)
+		async def report(progress: float, message: str) -> None:
+			if ctx is not None:
+				await ctx.report_progress(progress, 100, message)
+
+		return await bridge.ask(
+			prompt,
+			new_chat=new_chat,
+			timeout_seconds=timeout_seconds,
+			progress=report,
+		)
 	except ChatGPTWebError as exc:
 		return _error_result(exc)
 	except Exception:

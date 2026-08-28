@@ -31,6 +31,7 @@ DEFAULT_WINDOW_X = 24
 DEFAULT_WINDOW_Y = 60
 MAX_PROMPT_CHARS = 50_000
 MAX_RESPONSE_CHARS = 100_000
+MAX_PROGRESS_TAIL_CHARS = 1_200
 CHATGPT_ORIGIN_GUARD_JS = """
 const currentUrl = new URL(location.href);
 const currentHost = currentUrl.hostname.toLowerCase().replace(/\\.$/, '');
@@ -84,6 +85,7 @@ class CookieSafeBrowserSession(BrowserSession):
 
 SessionFactory = Callable[..., BrowserSession]
 SleepFunction = Callable[[float], Awaitable[None]]
+ProgressReporter = Callable[[float, str], Awaitable[None]]
 
 
 def _canonical_profile_dir(value: Path | str) -> Path:
@@ -649,6 +651,14 @@ class ChatGPTWebBridge:
 	def _normalized_text(value: object) -> str:
 		return " ".join(str(value or "").split())
 
+	@staticmethod
+	def _progress_response_tail(response: str) -> str:
+		"""Bound progress content while preserving enough recent context to review."""
+		tail = response.strip()
+		if len(tail) <= MAX_PROGRESS_TAIL_CHARS:
+			return tail
+		return "…" + tail[-MAX_PROGRESS_TAIL_CHARS:]
+
 	def _submitted_user_turn_is_visible(self, state: dict[str, Any], prompt: str) -> bool:
 		before_count = self._operation_user_count_before
 		if before_count is None:
@@ -918,15 +928,29 @@ class ChatGPTWebBridge:
 				if not response:
 					raise ChatGPTWebError("No ChatGPT assistant response is available in the current conversation.")
 				truncated = len(response) > MAX_RESPONSE_CHARS
+				streaming = bool(state.get("streaming"))
 				return {
 					"ok": True,
+					"status": "in_progress" if streaming else "completed",
+					"message": (
+						"ChatGPT is still generating a response."
+						if streaming
+						else "ChatGPT has finished and the final response is ready."
+					),
 					"response": response[:MAX_RESPONSE_CHARS],
 					"truncated": truncated,
-					"streaming": bool(state.get("streaming")),
+					"streaming": streaming,
 					"url": state.get("url"),
 				}
 
-	async def ask(self, prompt: str, *, new_chat: bool = True, timeout_seconds: int = 600) -> dict[str, Any]:
+	async def ask(
+		self,
+		prompt: str,
+		*,
+		new_chat: bool = True,
+		timeout_seconds: int = 600,
+		progress: ProgressReporter | None = None,
+	) -> dict[str, Any]:
 		if not isinstance(prompt, str) or not prompt.strip():
 			raise ChatGPTWebError("Prompt must be a non-empty string.")
 		if len(prompt) > MAX_PROMPT_CHARS:
@@ -934,12 +958,19 @@ class ChatGPTWebBridge:
 		if timeout_seconds < 10 or timeout_seconds > 900:
 			raise ChatGPTWebError("timeout_seconds must be between 10 and 900.")
 
+		async def report(percent: float, message: str) -> None:
+			if progress is not None:
+				await progress(percent, message)
+
 		async with self._lock:
 			with self._operation_scope():
 				started = time.monotonic()
+				await report(5, "Opening the dedicated ChatGPT session.")
 				await self._ensure_session()
 				if new_chat:
+					await report(15, "Opening a fresh ChatGPT conversation.")
 					await self._navigate()
+				await report(25, "Preparing the ChatGPT prompt.")
 				before = await self._wait_for_composer()
 				if before.get("streaming"):
 					before = await self._wait_until_idle(timeout_seconds=min(60, timeout_seconds))
@@ -958,6 +989,7 @@ class ChatGPTWebBridge:
 				await self._focus_and_clear_composer()
 				await self._insert_text(prompt)
 				await self._submit(prompt)
+				await report(35, "Question sent. Waiting for ChatGPT to start responding.")
 				self._operation_response_identity = before_identity
 				self._operation_user_count_before = before_user_count
 				self._operation_allow_new_chat_transition = new_chat and not self._is_conversation_url(
@@ -968,14 +1000,53 @@ class ChatGPTWebBridge:
 				stable_text = ""
 				stable_polls = 0
 				latest_state: dict[str, Any] = {}
+				last_wait_state: str | None = None
+				last_progress_at = started
+				last_reported_tail = ""
 				while time.monotonic() < deadline:
 					latest_state = await self._response_page_state(prompt)
 					if latest_state is None:
+						now = time.monotonic()
+						if last_wait_state != "waiting_for_response" or now - last_progress_at >= 15:
+							await report(45, "Question sent. Waiting for ChatGPT to start responding.")
+							last_wait_state = "waiting_for_response"
+							last_progress_at = now
 						await self._sleep(self._poll_interval)
 						continue
 					latest_text = str(latest_state.get("latest_text", "")).strip()
 					is_new = int(latest_state.get("assistant_count", 0)) > before_count
-					if is_new and latest_text and not latest_state.get("streaming"):
+					is_streaming = bool(latest_state.get("streaming"))
+					wait_state = (
+						"generating"
+						if is_new and is_streaming
+						else "finalizing"
+						if is_new
+						else "waiting_for_response"
+					)
+					now = time.monotonic()
+					response_tail = self._progress_response_tail(latest_text) if is_new and is_streaming else ""
+					should_report_tail = (
+						bool(response_tail)
+						and response_tail != last_reported_tail
+						and now - last_progress_at >= 3
+					)
+					if wait_state != last_wait_state or should_report_tail or now - last_progress_at >= 15:
+						message = {
+							"waiting_for_response": "Question sent. Waiting for ChatGPT to start responding.",
+							"generating": "ChatGPT is generating its response.",
+							"finalizing": "ChatGPT stopped generating; confirming the final response is stable.",
+						}[wait_state]
+						if response_tail:
+							message = f"{message}\n\nLatest visible response tail:\n{response_tail}"
+						await report(
+							{"waiting_for_response": 45, "generating": 65, "finalizing": 85}[wait_state],
+							message,
+						)
+						last_wait_state = wait_state
+						last_progress_at = now
+						if response_tail:
+							last_reported_tail = response_tail
+					if is_new and latest_text and not is_streaming:
 						if latest_text == stable_text:
 							stable_polls += 1
 						else:
@@ -983,8 +1054,11 @@ class ChatGPTWebBridge:
 							stable_polls = 1
 						if stable_polls >= 3:
 							truncated = len(latest_text) > MAX_RESPONSE_CHARS
+							await report(100, "ChatGPT has finished and the final response is ready.")
 							return {
 								"ok": True,
+								"status": "completed",
+								"message": "ChatGPT has finished and the final response is ready.",
 								"response": latest_text[:MAX_RESPONSE_CHARS],
 								"truncated": truncated,
 								"url": latest_state.get("url"),
