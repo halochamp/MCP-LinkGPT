@@ -1220,7 +1220,12 @@ class ChatGPTWebBridgeTests(unittest.IsolatedAsyncioTestCase):
 		)
 
 		with self.assertRaisesRegex(ChatGPTWebError, r"user turn changed.*reason=text"):
-			await bridge.ask("bridge prompt", new_chat=False, timeout_seconds=10)
+			await bridge.ask(
+				"bridge prompt",
+				new_chat=False,
+				timeout_seconds=10,
+				strict_user_turn_text=True,
+			)
 
 	async def test_multiple_new_user_turns_report_count_mismatch(self) -> None:
 		bridge = ScriptedBridge(
@@ -1273,6 +1278,10 @@ class ChatGPTWebBridgeTests(unittest.IsolatedAsyncioTestCase):
 		rendered = "before\n\npython\nx = 1\nprint(x)\n\nafter"
 		self.assertEqual(ChatGPTWebBridge._normalize_markdown_text(fenced), rendered)
 		self.assertEqual(
+			ChatGPTWebBridge._normalize_markdown_text("before\n\n```python\nx = 1\n```"),
+			"before\n\n\npython\nx = 1",
+		)
+		self.assertEqual(
 			ChatGPTWebBridge._normalize_markdown_text("before\n```python\nx = 1\nafter"),
 			"before\n```python\nx = 1\nafter",
 		)
@@ -1299,6 +1308,23 @@ class ChatGPTWebBridgeTests(unittest.IsolatedAsyncioTestCase):
 			ChatGPTWebBridge._normalized_text("ALLOW DENY"),
 		)
 
+	def test_mismatch_metadata_is_structural_bounded_and_content_free(self) -> None:
+		expected = "private alpha\n    secret value\n" + "x\n" * 20
+		observed = "private alpha\nsecret value\n" + "x\n" * 20
+
+		metadata = ChatGPTWebBridge._mismatch_metadata(expected, observed, stage="markdown")
+
+		self.assertIn("stage=markdown", metadata)
+		self.assertIn("first_diff_line=1", metadata)
+		self.assertIn("first_diff_column=0", metadata)
+		self.assertIn("expected_class=SPACE", metadata)
+		self.assertIn("observed_class=ASCII_ALNUM", metadata)
+		self.assertIn("expected_whitespace_run=4", metadata)
+		self.assertIn("remaining_length_delta=-4", metadata)
+		self.assertIn(",...", metadata)
+		self.assertNotIn("private", metadata)
+		self.assertNotIn("secret", metadata)
+
 	async def test_user_turn_rejects_semantic_whitespace_changes(self) -> None:
 		cases = [
 			("if authorized:\n    delete_files()", "if authorized:\ndelete_files()"),
@@ -1318,8 +1344,16 @@ class ChatGPTWebBridgeTests(unittest.IsolatedAsyncioTestCase):
 						),
 					]
 				)
-				with self.assertRaisesRegex(ChatGPTWebError, r"user turn changed.*reason=text"):
-					await bridge.ask(raw_prompt, new_chat=False, timeout_seconds=10)
+				with self.assertRaisesRegex(ChatGPTWebError, r"user turn changed.*reason=text") as raised:
+					await bridge.ask(
+						raw_prompt,
+						new_chat=False,
+						timeout_seconds=10,
+						strict_user_turn_text=True,
+					)
+				self.assertIn("stage=markdown", str(raised.exception))
+				self.assertNotIn("delete_files", str(raised.exception))
+				self.assertNotIn("ALLOW", str(raised.exception))
 
 	async def test_user_turn_accepts_inline_code_rendered_text(self) -> None:
 		raw_prompt = "Review `_profile_lock` and `chatgpt_status()` with high priority."
@@ -1357,6 +1391,51 @@ class ChatGPTWebBridgeTests(unittest.IsolatedAsyncioTestCase):
 		result = await bridge.ask(raw_prompt, new_chat=False, timeout_seconds=10)
 		self.assertEqual(result["response"], "reviewed")
 
+	async def test_user_turn_returns_warning_for_default_structural_fallback(self) -> None:
+		raw_prompt = "before\n```python\nx = 1\n```\nafter"
+		rendered_text = "before\n\npython\n\nx = 1\n\nafter"
+		bridge = ScriptedBridge(
+			[
+				state(),
+				state(
+					user_count=1,
+					latest_user_text=rendered_text,
+					assistant_count=1,
+					latest_text="usable with warning",
+					stop_visible=False,
+				),
+			]
+		)
+
+		result = await bridge.ask(raw_prompt, new_chat=False, timeout_seconds=10)
+
+		self.assertEqual(result["response"], "usable with warning")
+		self.assertEqual(result["correlation_status"], "rendering_fallback")
+		self.assertIn("structural ownership fallback", result["correlation_warning"])
+		self.assertNotIn("x = 1", result["correlation_warning"])
+
+	async def test_default_structural_fallback_returns_semantic_mismatch_with_warning(self) -> None:
+		bridge = ScriptedBridge(
+			[
+				state(),
+				state(
+					user_count=1,
+					latest_user_text="different rendered text",
+					assistant_count=1,
+					latest_text="usable but lower-confidence",
+					stop_visible=False,
+				),
+			]
+		)
+
+		result = await bridge.ask("original prompt", new_chat=False, timeout_seconds=10)
+
+		self.assertEqual(result["status"], "completed")
+		self.assertEqual(result["correlation_status"], "rendering_fallback")
+		self.assertIn("rendered text correlation differed", result["correlation_warning"])
+		self.assertNotIn("original prompt", result["correlation_warning"])
+		self.assertNotIn("different rendered text", result["correlation_warning"])
+
 	async def test_user_turn_rejects_high_similarity_semantic_change(self) -> None:
 		raw_prompt = ("Review this safety policy carefully. " * 80) + "DO NOT DELETE FILES."
 		rendered_text = ("Review this safety policy carefully. " * 80) + "DELETE FILES."
@@ -1373,7 +1452,7 @@ class ChatGPTWebBridgeTests(unittest.IsolatedAsyncioTestCase):
 			]
 		)
 		with self.assertRaisesRegex(ChatGPTWebError, r"user turn changed.*reason=text"):
-			await bridge.ask(raw_prompt, new_chat=False, timeout_seconds=10)
+			await bridge.ask(raw_prompt, new_chat=False, timeout_seconds=10, strict_user_turn_text=True)
 
 	async def test_user_turn_rejects_unrelated_text(self) -> None:
 		raw_prompt = "A" * 100
@@ -1390,7 +1469,7 @@ class ChatGPTWebBridgeTests(unittest.IsolatedAsyncioTestCase):
 			]
 		)
 		with self.assertRaisesRegex(ChatGPTWebError, r"user turn changed.*reason=text"):
-			await bridge.ask(raw_prompt, new_chat=False, timeout_seconds=10)
+			await bridge.ask(raw_prompt, new_chat=False, timeout_seconds=10, strict_user_turn_text=True)
 
 
 if __name__ == "__main__":

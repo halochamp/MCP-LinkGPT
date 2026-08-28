@@ -132,6 +132,8 @@ class ChatGPTWebBridge:
 		self._operation_user_count_before: int | None = None
 		self._operation_allow_new_chat_transition = False
 		self._operation_new_chat_transition_count = 0
+		self._operation_correlation_warning: str | None = None
+		self._operation_strict_user_turn_text = False
 
 	@contextmanager
 	def _operation_scope(self) -> Iterator[None]:
@@ -141,12 +143,16 @@ class ChatGPTWebBridge:
 		previous_user_count_before = self._operation_user_count_before
 		previous_allow_new_chat_transition = self._operation_allow_new_chat_transition
 		previous_new_chat_transition_count = self._operation_new_chat_transition_count
+		previous_correlation_warning = self._operation_correlation_warning
+		previous_strict_user_turn_text = self._operation_strict_user_turn_text
 		self._operation_target_id = None
 		self._operation_page_identity = None
 		self._operation_response_identity = None
 		self._operation_user_count_before = None
 		self._operation_allow_new_chat_transition = False
 		self._operation_new_chat_transition_count = 0
+		self._operation_correlation_warning = None
+		self._operation_strict_user_turn_text = False
 		try:
 			yield
 		except asyncio.CancelledError:
@@ -162,6 +168,8 @@ class ChatGPTWebBridge:
 			self._operation_user_count_before = previous_user_count_before
 			self._operation_allow_new_chat_transition = previous_allow_new_chat_transition
 			self._operation_new_chat_transition_count = previous_new_chat_transition_count
+			self._operation_correlation_warning = previous_correlation_warning
+			self._operation_strict_user_turn_text = previous_strict_user_turn_text
 
 	def _acquire_profile_lock(self) -> None:
 		if self._profile_lock_handle is not None:
@@ -678,7 +686,7 @@ class ChatGPTWebBridge:
 				rendered_lines.append(lines[index])
 				index += 1
 				continue
-			if rendered_lines and rendered_lines[-1] != "":
+			if rendered_lines:
 				rendered_lines.append("")
 			rendered_lines.append(language)
 			rendered_lines.extend(lines[index + 1 : closer_index])
@@ -688,6 +696,64 @@ class ChatGPTWebBridge:
 		text = "\n".join(rendered_lines)
 		text = re.sub(r"(?<![\\`])`([^`\n]+)`(?!`)", r"\1", text)
 		return cls._normalized_text(text)
+
+	@staticmethod
+	def _character_class(value: str | None) -> str:
+		if value is None:
+			return "END"
+		if value == "\n":
+			return "NEWLINE"
+		if value == " ":
+			return "SPACE"
+		if value == "\t":
+			return "TAB"
+		if value == "`":
+			return "BACKTICK"
+		if value.isascii() and value.isalnum():
+			return "ASCII_ALNUM"
+		if value.isascii() and not value.isalnum():
+			return "ASCII_PUNCT"
+		if not value.isascii():
+			return "NON_ASCII"
+		return "OTHER"
+
+	@classmethod
+	def _mismatch_metadata(cls, expected: str, observed: str, *, stage: str) -> str:
+		"""Return bounded structural mismatch metadata without source text or hashes."""
+		common = 0
+		limit = min(len(expected), len(observed))
+		while common < limit and expected[common] == observed[common]:
+			common += 1
+		expected_char = expected[common] if common < len(expected) else None
+		observed_char = observed[common] if common < len(observed) else None
+		line = expected.count("\n", 0, common)
+		line_start = expected.rfind("\n", 0, common) + 1
+		column = common - line_start
+
+		def line_lengths(value: str) -> str:
+			lengths = [len(item) for item in value.split("\n")]
+			visible = lengths[:16]
+			suffix = ",..." if len(lengths) > len(visible) else ""
+			return "[" + ",".join(str(item) for item in visible) + suffix + "]"
+
+		def whitespace_run(value: str, offset: int) -> int:
+			end = offset
+			while end < len(value) and value[end] in {" ", "\t"}:
+				end += 1
+			return end - offset
+
+		return (
+			f"stage={stage}, expected_lines={expected.count(chr(10)) + 1}, "
+			f"observed_lines={observed.count(chr(10)) + 1}, "
+			f"expected_line_lengths={line_lengths(expected)}, "
+			f"observed_line_lengths={line_lengths(observed)}, "
+			f"first_diff_line={line}, first_diff_column={column}, first_diff_offset={common}, "
+			f"expected_class={cls._character_class(expected_char)}, "
+			f"observed_class={cls._character_class(observed_char)}, "
+			f"expected_whitespace_run={whitespace_run(expected, common)}, "
+			f"observed_whitespace_run={whitespace_run(observed, common)}, "
+			f"remaining_length_delta={len(observed) - len(expected)}"
+		)
 
 	@staticmethod
 	def _progress_response_tail(response: str) -> str:
@@ -725,11 +791,18 @@ class ChatGPTWebBridge:
 			exp_md = self._normalize_markdown_text(expected_user_text)
 			obs_md = self._normalize_markdown_text(latest_user_text)
 			if exp_md != obs_md:
-				raise ChatGPTWebError(
-					"The ChatGPT user turn changed during response collection "
-					f"(reason=text, expected_chars={len(expected_user_text)}, "
-					f"observed_chars={len(latest_user_text)})."
-				)
+				diagnostic = self._mismatch_metadata(exp_md, obs_md, stage="markdown")
+				if not self._operation_strict_user_turn_text:
+					self._operation_correlation_warning = (
+						"The submitted user turn was accepted through the structural ownership fallback "
+						f"after rendered text correlation differed ({diagnostic})."
+					)
+				else:
+					raise ChatGPTWebError(
+						"The ChatGPT user turn changed during response collection "
+						f"(reason=text, expected_chars={len(expected_user_text)}, "
+						f"observed_chars={len(latest_user_text)}, {diagnostic})."
+					)
 		return True
 
 	async def _response_page_state(self, prompt: str) -> dict[str, Any] | None:
@@ -1072,6 +1145,7 @@ class ChatGPTWebBridge:
 		*,
 		new_chat: bool = True,
 		timeout_seconds: int = 600,
+		strict_user_turn_text: bool = False,
 		progress: ProgressReporter | None = None,
 	) -> dict[str, Any]:
 		if not isinstance(prompt, str) or not prompt.strip():
@@ -1122,6 +1196,7 @@ class ChatGPTWebBridge:
 				if before_identity is None:
 					raise ChatGPTWebError("The ChatGPT page has no stable identity for this operation.")
 				self._operation_page_identity = before_identity
+				self._operation_strict_user_turn_text = strict_user_turn_text
 
 				await self._focus_and_clear_composer()
 				await self._insert_text(prompt)
@@ -1212,7 +1287,7 @@ class ChatGPTWebBridge:
 						if stable_polls >= 3:
 							truncated = len(latest_text) > MAX_RESPONSE_CHARS
 							await report(100, "ChatGPT has finished and the final response is ready.")
-							return {
+							result: dict[str, Any] = {
 								"ok": True,
 								"status": "completed",
 								"message": "ChatGPT has finished and the final response is ready.",
@@ -1221,6 +1296,10 @@ class ChatGPTWebBridge:
 								"url": latest_state.get("url"),
 								"elapsed_seconds": round(time.monotonic() - started, 2),
 							}
+							if self._operation_correlation_warning is not None:
+								result["correlation_status"] = "rendering_fallback"
+								result["correlation_warning"] = self._operation_correlation_warning
+							return result
 					else:
 						stable_polls = 0
 					await self._sleep(self._poll_interval)

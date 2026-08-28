@@ -118,6 +118,7 @@ async def chatgpt_ask(
 	prompt: str,
 	new_chat: bool = True,
 	timeout_seconds: int = 600,
+	strict_user_turn_text: bool = False,
 	ctx: Context = None,  # type: ignore[assignment]
 ) -> dict[str, object]:
 	"""Send one prompt and wait for its confirmed final response.
@@ -126,7 +127,13 @@ async def chatgpt_ask(
 	another browser tool while waiting. Progress notifications and response tails
 	are context, not final advice; progress values do not decrease when ChatGPT
 	temporarily hides an already-started response turn. Accept only ``ok=true`` with
-	``status="completed"``. After a timeout, recover with chatgpt_last_response
+	``status="completed"``. By default, post-submit rendered-text mismatch is
+	advisory because ChatGPT's UI representation can change; exact pre-click
+	composer verification plus conversation, target, and user-turn-count ownership
+	remain mandatory. Such a completion returns
+	``correlation_status="rendering_fallback"`` and ``correlation_warning``.
+	Set ``strict_user_turn_text=true`` only when a rendered-text mismatch must fail.
+	After a timeout, recover with chatgpt_last_response
 	without resending. After any
 	ambiguous non-timeout error, discard partial output and do not retry; a new
 	attempt requires explicit user direction.
@@ -136,6 +143,8 @@ async def chatgpt_ask(
 		new_chat: Start from a fresh conversation before sending.
 		timeout_seconds: Response timeout from 10 to 900 seconds. The host MCP tool
 			timeout must be no shorter; local connector work may take several minutes.
+		strict_user_turn_text: Fail instead of warning when ChatGPT's rendered user
+			turn text differs after known Markdown normalization. Defaults to false.
 	"""
 
 	try:
@@ -147,6 +156,7 @@ async def chatgpt_ask(
 			prompt,
 			new_chat=new_chat,
 			timeout_seconds=timeout_seconds,
+			strict_user_turn_text=strict_user_turn_text,
 			progress=report,
 		)
 	except ChatGPTWebError as exc:

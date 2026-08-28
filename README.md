@@ -47,7 +47,12 @@ they identify the connected service rather than the project display name.
   temporarily hides a response turn after generation started, the bridge keeps
   the response phase instead of reporting that generation never began. The call
   then returns the confirmed final response with `status: "completed"` and an
-  explicit completion message.
+  explicit completion message. Post-submit rendered-text correlation is
+  advisory by default because the ChatGPT UI representation can change. A
+  mismatch may still complete with `correlation_status: "rendering_fallback"`
+  and an explicit `correlation_warning`; the answer is usable but
+  lower-confidence. Set `strict_user_turn_text=true` when any rendered-text
+  mismatch must fail instead.
 
 Only one process can own the dedicated profile at a time. Prompts and responses
 are not written to application logs. CAPTCHA and human-verification pages are
@@ -75,13 +80,18 @@ wait for explicit cleanup.
 
 Before sending, `chatgpt_ask` verifies the visible composer still contains the
 exact normalized prompt in the same guarded runtime evaluation that clicks Send.
-After sending, it requires exactly one new user turn whose latest text matches
-that prompt before accepting a new assistant response. Normalization changes
+After sending, it requires exactly one new user turn. Normalization changes
 only line endings and ChatGPT's NBSP representation; indentation, repeated
-spaces, tabs, blank lines, and line boundaries remain significant. The only
-additional accepted forms are explicitly observed inline-code and paired
-fenced-code presentation transformations. General fuzzy similarity is never
-ownership evidence. A manual or otherwise ambiguous turn fails closed.
+spaces, tabs, blank lines, and line boundaries remain significant. Explicitly
+observed inline-code and paired fenced-code presentation transformations are
+modeled for exact correlation. If rendered text still differs, the default
+structural ownership fallback continues because the bridge already verified the
+exact composer atomically before clicking Send and still requires the bound
+conversation, document, browser target, and exact user-turn count. General
+fuzzy similarity is never used. The result includes structural, content-free
+mismatch metadata in `correlation_warning`. Set `strict_user_turn_text=true` to
+make post-submit rendered text a hard gate. Count, conversation, document, and
+target mismatches always fail closed.
 
 This MCP is directional: Codex can call ChatGPT Web, but ChatGPT Web cannot call
 back through this server to read arbitrary local paths. ChatGPT Web may still
@@ -198,6 +208,9 @@ response tail (up to 1,200 characters); it lets the calling agent understand
 the current context before the final response arrives. Do not make another
 browser call until `chatgpt_ask` returns. A successful result includes
 `status: "completed"` and confirms that the final answer is ready to use.
+When `correlation_status` is `rendering_fallback`, retain and disclose its
+`correlation_warning` when the distinction matters; do not represent it as an
+exactly correlated answer.
 
 If `chatgpt_ask` times out, do not resubmit the prompt. Wait 2-5 seconds between
 bounded `chatgpt_last_response()` polls and accept only `status: "completed"`.
@@ -392,7 +405,11 @@ ChatGPT/OpenAI ที่จำเป็นสำหรับเว็บไซ�
   รายการ พร้อมส่ง progress และ tail ของคำตอบที่กำลังสร้าง ค่า progress จะไม่
   ลดลง หาก ChatGPT ซ่อน response turn ที่เริ่มสร้างแล้วชั่วคราว bridge จะคง
   สถานะ response ไว้แทนการรายงานว่ายังไม่เริ่มสร้างคำตอบ จากนั้นจึงคืนคำตอบ
-  สุดท้ายที่ยืนยันว่าเสถียรแล้วพร้อม `status: "completed"`
+  สุดท้ายที่ยืนยันว่าเสถียรแล้วพร้อม `status: "completed"` โดยค่าเริ่มต้น
+  ความต่างของข้อความที่ UI render หลังส่งเป็นเพียงคำเตือน เพราะ representation
+  ของ ChatGPT เปลี่ยนได้ หากต่างกันระบบยังคืนคำตอบพร้อม
+  `correlation_status: "rendering_fallback"` และ `correlation_warning` ได้
+  ใช้ `strict_user_turn_text=true` เมื่อต้องการให้ความต่างดังกล่าวเป็น error
 
 มีเพียงหนึ่ง process เท่านั้นที่เป็นเจ้าของ profile เฉพาะได้ในเวลาเดียวกัน
 ระบบไม่เขียน prompt หรือ response ลง application logs จะไม่พยายามข้าม CAPTCHA
@@ -417,12 +434,12 @@ process การยกเลิกหลังส่ง prompt แล้วไ�
 
 ก่อนส่ง `chatgpt_ask` จะตรวจว่า composer ที่มองเห็นมี prompt ที่ normalize แล้ว
 ตรงกันทุกตัวอักษรใน runtime evaluation เดียวกับการคลิก Send หลังส่งจะต้องพบ
-user turn ใหม่เพียงหนึ่งรายการ และข้อความล่าสุดต้องตรงกับ prompt ก่อนยอมรับ
-assistant response ใหม่ การ normalize เปลี่ยนเฉพาะรูปแบบ newline และ NBSP ของ
-ChatGPT เท่านั้น โดย indentation, ช่องว่างซ้ำ, tab, blank line และขอบเขตแต่ละ
-บรรทัดยังมีความหมาย รูปแบบเพิ่มเติมที่ยอมรับมีเฉพาะการแสดงผล inline code และ
-paired fenced code ที่ตรวจยืนยันแล้วเท่านั้น ระบบไม่ใช้ fuzzy similarity เป็น
-หลักฐาน ownership หากมีการแก้ไขด้วยมือหรือสถานะกำกวม ระบบจะ fail closed
+user turn ใหม่เพียงหนึ่งรายการ และยังต้องเป็น conversation, document และ browser
+target ที่ผูกกับ operation เดิม การ match ข้อความที่ UI render เป็น advisory
+โดยค่าเริ่มต้น หากข้อความต่าง ระบบจะรอคำตอบต่อและคืน structural metadata ที่ไม่
+เปิดเผยเนื้อหาใน `correlation_warning` ระบบไม่ใช้ fuzzy similarity ส่วน count,
+conversation, document และ target mismatch ยังคง fail closed เสมอ หากต้องการ
+ให้ rendered text เป็น hard gate ให้ตั้ง `strict_user_turn_text=true`
 
 MCP นี้เป็น directional: Codex เรียก ChatGPT Web ได้ แต่ ChatGPT Web เรียกกลับ
 ผ่าน server นี้เพื่ออ่าน path ในเครื่องแบบ arbitrary ไม่ได้ หากผู้ใช้ติดตั้ง
@@ -494,6 +511,9 @@ chatgpt_ask(
 ของข้อความที่มองเห็นได้ (ไม่เกิน 1,200 ตัวอักษร) เพื่อให้ agent เข้าใจบริบท
 ปัจจุบันก่อนคำตอบสุดท้ายมา ห้ามเรียก browser tool อื่นจนกว่า `chatgpt_ask` จะคืน
 ผลสำเร็จ ซึ่งจะมี `status: "completed"` และข้อความยืนยันว่าคำตอบสุดท้ายพร้อมใช้
+หากมี `correlation_status: "rendering_fallback"` ให้เก็บและแจ้ง
+`correlation_warning` เมื่อความแตกต่างมีผลต่อการตัดสินใจ และไม่ควรกล่าวว่าเป็น
+คำตอบที่ correlate กับ rendered text แบบ exact
 
 ถ้า `chatgpt_ask` timeout ห้ามส่ง prompt ซ้ำ ให้เว้น 2-5 วินาทีระหว่างการเรียก
 `chatgpt_last_response()` แบบมีขอบเขต และยอมรับเฉพาะ `status: "completed"`
