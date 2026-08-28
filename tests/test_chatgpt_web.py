@@ -18,6 +18,7 @@ from chatgpt_web import (  # noqa: E402
 	ChatGPTWebError,
 	CookieSafeBrowserSession,
 	LoginRequiredError,
+	ReadinessTimeoutError,
 	REPOSITORY_ROOT,
 )
 
@@ -656,6 +657,97 @@ class ChatGPTWebBridgeTests(unittest.IsolatedAsyncioTestCase):
 		self.assertEqual(result["status"], "login_required")
 		self.assertEqual(bridge.navigations, 0)
 
+	async def test_status_waits_through_transient_loading_until_ready(self) -> None:
+		bridge = ScriptedBridge(
+			[
+				state(composer_ready=False),
+				state(composer_ready=False),
+				state(composer_ready=True),
+			]
+		)
+
+		result = await bridge.status(timeout_seconds=1)
+
+		self.assertTrue(result["ok"])
+		self.assertEqual(result["status"], "ready")
+
+	async def test_status_readiness_timeout_closes_before_returning_failure(self) -> None:
+		class TimeoutBridge(ScriptedBridge):
+			def __init__(self) -> None:
+				super().__init__([state(composer_ready=False)])
+				self.closed_after_timeout = False
+
+			async def _close_session_unlocked(self) -> None:
+				self.closed_after_timeout = True
+
+		bridge = TimeoutBridge()
+
+		with self.assertRaises(ReadinessTimeoutError):
+			await bridge.status(timeout_seconds=0)
+
+		self.assertTrue(bridge.closed_after_timeout)
+
+	async def test_status_readiness_deadline_includes_browser_startup(self) -> None:
+		class SlowStartBridge(ScriptedBridge):
+			def __init__(self) -> None:
+				super().__init__([state()])
+				self.closed_after_timeout = False
+
+			async def _ensure_session(self) -> object:  # type: ignore[override]
+				await asyncio.sleep(0.05)
+				return object()
+
+			async def _close_session_unlocked(self) -> None:
+				self.closed_after_timeout = True
+
+		bridge = SlowStartBridge()
+		started = asyncio.get_running_loop().time()
+
+		with self.assertRaises(ReadinessTimeoutError):
+			await bridge.status(timeout_seconds=0.005)
+
+		elapsed = asyncio.get_running_loop().time() - started
+		self.assertLess(elapsed, 0.04)
+		self.assertTrue(bridge.closed_after_timeout)
+
+	async def test_readiness_timeout_preserves_cause_when_cleanup_fails(self) -> None:
+		class CleanupFailureBridge(ScriptedBridge):
+			async def _wait_for_readiness(
+				self,
+				timeout_seconds: float = 30.0,
+				*,
+				deadline: float | None = None,
+			) -> tuple[str, dict[str, Any]]:
+				raise ReadinessTimeoutError("readiness expired")
+
+			async def _close_session_unlocked(self) -> None:
+				raise ChatGPTWebError("kill failed")
+
+		bridge = CleanupFailureBridge([state()])
+
+		with self.assertRaises(ReadinessTimeoutError) as raised:
+			await bridge.status(timeout_seconds=1)
+
+		self.assertIn("readiness expired", str(raised.exception))
+		self.assertIn("shutdown also failed", str(raised.exception).lower())
+		self.assertIsInstance(raised.exception.__cause__, ChatGPTWebError)
+
+	async def test_status_challenge_is_terminal_and_does_not_close_browser(self) -> None:
+		class ChallengeBridge(ScriptedBridge):
+			def __init__(self) -> None:
+				super().__init__([state(challenge=True, composer_ready=False)])
+				self.closed = False
+
+			async def _close_session_unlocked(self) -> None:
+				self.closed = True
+
+		bridge = ChallengeBridge()
+		result = await bridge.status()
+
+		self.assertFalse(result["ok"])
+		self.assertEqual(result["status"], "challenge")
+		self.assertFalse(bridge.closed)
+
 	async def test_page_state_uses_structural_login_scope_and_document_identity(self) -> None:
 		class CapturingBridge(ChatGPTWebBridge):
 			def __init__(self) -> None:
@@ -753,6 +845,78 @@ class ChatGPTWebBridgeTests(unittest.IsolatedAsyncioTestCase):
 		)
 		with self.assertRaises(LoginRequiredError):
 			await bridge.ask("prompt", timeout_seconds=10)
+
+	async def test_ask_readiness_timeout_closes_before_prompt_submission(self) -> None:
+		class TimeoutBridge(ScriptedBridge):
+			def __init__(self) -> None:
+				super().__init__([state(composer_ready=False)])
+				self.closed_after_timeout = False
+
+			async def _wait_for_composer(
+				self,
+				timeout_seconds: float = 30.0,
+				*,
+				deadline: float | None = None,
+			) -> dict[str, Any]:
+				raise ReadinessTimeoutError("not ready")
+
+			async def _close_session_unlocked(self) -> None:
+				self.closed_after_timeout = True
+
+		bridge = TimeoutBridge()
+
+		with self.assertRaises(ReadinessTimeoutError):
+			await bridge.ask("prompt", timeout_seconds=10)
+
+		self.assertTrue(bridge.closed_after_timeout)
+		self.assertEqual(bridge.inserted, [])
+		self.assertEqual(bridge.submits, 0)
+
+	async def test_new_chat_readiness_timeout_closes_before_returning_failure(self) -> None:
+		class TimeoutBridge(ScriptedBridge):
+			def __init__(self) -> None:
+				super().__init__([state(composer_ready=False)])
+				self.closed_after_timeout = False
+
+			async def _wait_for_composer(
+				self,
+				timeout_seconds: float = 30.0,
+				*,
+				deadline: float | None = None,
+			) -> dict[str, Any]:
+				raise ReadinessTimeoutError("not ready")
+
+			async def _close_session_unlocked(self) -> None:
+				self.closed_after_timeout = True
+
+		bridge = TimeoutBridge()
+
+		with self.assertRaises(ReadinessTimeoutError):
+			await bridge.new_chat()
+
+		self.assertTrue(bridge.closed_after_timeout)
+
+	async def test_ask_readiness_deadline_includes_browser_startup(self) -> None:
+		class SlowStartBridge(ScriptedBridge):
+			def __init__(self) -> None:
+				super().__init__([state()])
+				self.closed_after_timeout = False
+
+			async def _ensure_session(self) -> object:  # type: ignore[override]
+				await asyncio.sleep(0.05)
+				return object()
+
+			async def _close_session_unlocked(self) -> None:
+				self.closed_after_timeout = True
+
+		bridge = SlowStartBridge()
+		with patch("chatgpt_web.DEFAULT_READINESS_TIMEOUT_SECONDS", 0.005):
+			with self.assertRaises(ReadinessTimeoutError):
+				await bridge.ask("prompt", timeout_seconds=10)
+
+		self.assertTrue(bridge.closed_after_timeout)
+		self.assertEqual(bridge.inserted, [])
+		self.assertEqual(bridge.submits, 0)
 
 	async def test_close_keeps_profile_lock_when_browser_kill_fails(self) -> None:
 		class Session:

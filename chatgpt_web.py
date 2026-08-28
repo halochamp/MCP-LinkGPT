@@ -32,6 +32,7 @@ DEFAULT_WINDOW_Y = 60
 MAX_PROMPT_CHARS = 50_000
 MAX_RESPONSE_CHARS = 100_000
 MAX_PROGRESS_TAIL_CHARS = 1_200
+DEFAULT_READINESS_TIMEOUT_SECONDS = 30.0
 CHATGPT_ORIGIN_GUARD_JS = """
 const currentUrl = new URL(location.href);
 const currentHost = currentUrl.hostname.toLowerCase().replace(/\\.$/, '');
@@ -55,6 +56,10 @@ class LoginRequiredError(ChatGPTWebError):
 
 class ChallengeDetectedError(ChatGPTWebError):
 	"""A CAPTCHA or browser-verification challenge requires a human."""
+
+
+class ReadinessTimeoutError(ChatGPTWebError):
+	"""ChatGPT Web did not become interactively ready before the readiness deadline."""
 
 
 class CookieSafeBrowserSession(BrowserSession):
@@ -789,18 +794,59 @@ class ChatGPTWebBridge:
 			raise ChatGPTWebError("Could not inspect the ChatGPT page.")
 		return state
 
-	async def _wait_for_composer(self, timeout_seconds: float = 15.0) -> dict[str, Any]:
-		deadline = time.monotonic() + timeout_seconds
+	@classmethod
+	def _readiness_status(cls, state: dict[str, Any]) -> str:
+		url = state.get("url")
+		if state.get("challenge"):
+			return "challenge"
+		if cls._is_openai_auth_url(url) or (
+			state.get("login_required") and cls._is_interactive_chatgpt_url(url)
+		):
+			return "login_required"
+		if not cls._is_interactive_chatgpt_url(url):
+			raise ChatGPTWebError("The active browser page is outside the approved ChatGPT domain.")
+		return "ready" if state.get("composer_ready") else "loading"
+
+	async def _wait_for_readiness(
+		self,
+		timeout_seconds: float = DEFAULT_READINESS_TIMEOUT_SECONDS,
+		*,
+		deadline: float | None = None,
+	) -> tuple[str, dict[str, Any]]:
+		deadline = deadline if deadline is not None else time.monotonic() + timeout_seconds
 		last_state: dict[str, Any] = {}
-		while time.monotonic() < deadline:
+		while True:
 			last_state = await self._page_state()
-			self._raise_for_page_state(last_state)
-			if last_state.get("composer_ready"):
-				return last_state
-			await self._sleep(self._poll_interval)
-		raise ChatGPTWebError(
-			f"ChatGPT did not become ready within {timeout_seconds:g} seconds (page: {last_state.get('title', 'unknown')})."
-		)
+			status = self._readiness_status(last_state)
+			if status != "loading":
+				return status, last_state
+			if time.monotonic() >= deadline:
+				raise ReadinessTimeoutError(
+					f"ChatGPT did not become ready within {timeout_seconds:g} seconds "
+					f"(page: {last_state.get('title', 'unknown')})."
+				)
+			await self._sleep(max(self._poll_interval, 0.05))
+
+	async def _wait_for_composer(
+		self,
+		timeout_seconds: float = DEFAULT_READINESS_TIMEOUT_SECONDS,
+		*,
+		deadline: float | None = None,
+	) -> dict[str, Any]:
+		status, state = await self._wait_for_readiness(timeout_seconds, deadline=deadline)
+		if status == "ready":
+			return state
+		self._raise_for_page_state(state)
+		raise ChatGPTWebError("ChatGPT did not become interactively ready.")
+
+	async def _raise_readiness_timeout_after_cleanup(self, error: ReadinessTimeoutError) -> None:
+		try:
+			await self._close_session_unlocked()
+		except Exception as cleanup_exc:
+			raise ReadinessTimeoutError(
+				f"{error} Browser shutdown also failed; session ownership remains uncertain."
+			) from cleanup_exc
+		raise error
 
 	async def _focus_and_clear_composer(self) -> None:
 		expected_identity = self._operation_page_identity
@@ -882,29 +928,27 @@ class ChatGPTWebBridge:
 			"A previous ChatGPT response is still running. Wait for it to finish, then retry or read it with chatgpt_last_response."
 		)
 
-	async def status(self) -> dict[str, Any]:
+	async def status(self, timeout_seconds: float = DEFAULT_READINESS_TIMEOUT_SECONDS) -> dict[str, Any]:
 		async with self._lock:
 			with self._operation_scope():
-				await self._ensure_session()
-				state = await self._page_state()
-				url = state.get("url")
-				if not self._is_interactive_chatgpt_url(url) and not self._is_openai_auth_url(url):
-					await self._navigate()
-					state = await self._page_state()
-				url = state.get("url")
-				if not self._is_interactive_chatgpt_url(url) and not self._is_openai_auth_url(url):
-					raise ChatGPTWebError("The active browser page is outside the approved ChatGPT domain.")
-				status = (
-					"challenge"
-					if state.get("challenge")
-					else "login_required"
-					if self._is_openai_auth_url(url) or state.get("login_required")
-					else "ready"
-					if state.get("composer_ready")
-					else "loading"
-				)
+				deadline = time.monotonic() + timeout_seconds
+				try:
+					async with asyncio.timeout(timeout_seconds):
+						await self._ensure_session()
+						state = await self._page_state()
+						url = state.get("url")
+						if not self._is_interactive_chatgpt_url(url) and not self._is_openai_auth_url(url):
+							await self._navigate()
+						status, state = await self._wait_for_readiness(timeout_seconds, deadline=deadline)
+				except TimeoutError:
+					error = ReadinessTimeoutError(
+						f"ChatGPT did not become ready within {timeout_seconds:g} seconds."
+					)
+					await self._raise_readiness_timeout_after_cleanup(error)
+				except ReadinessTimeoutError as error:
+					await self._raise_readiness_timeout_after_cleanup(error)
 				return {
-					"ok": status == "ready" and self._is_interactive_chatgpt_url(url),
+					"ok": status == "ready",
 					"status": status,
 					"url": state.get("url"),
 					"assistant_messages": state.get("assistant_count", 0),
@@ -914,8 +958,18 @@ class ChatGPTWebBridge:
 	async def new_chat(self) -> dict[str, Any]:
 		async with self._lock:
 			with self._operation_scope():
-				await self._navigate()
-				state = await self._wait_for_composer()
+				deadline = time.monotonic() + DEFAULT_READINESS_TIMEOUT_SECONDS
+				try:
+					async with asyncio.timeout(DEFAULT_READINESS_TIMEOUT_SECONDS):
+						await self._navigate()
+						state = await self._wait_for_composer(deadline=deadline)
+				except TimeoutError:
+					error = ReadinessTimeoutError(
+						f"ChatGPT did not become ready within {DEFAULT_READINESS_TIMEOUT_SECONDS:g} seconds."
+					)
+					await self._raise_readiness_timeout_after_cleanup(error)
+				except ReadinessTimeoutError as error:
+					await self._raise_readiness_timeout_after_cleanup(error)
 				return {"ok": True, "status": "ready", "url": state.get("url")}
 
 	async def last_response(self) -> dict[str, Any]:
@@ -965,13 +1019,23 @@ class ChatGPTWebBridge:
 		async with self._lock:
 			with self._operation_scope():
 				started = time.monotonic()
-				await report(5, "Opening the dedicated ChatGPT session.")
-				await self._ensure_session()
-				if new_chat:
-					await report(15, "Opening a fresh ChatGPT conversation.")
-					await self._navigate()
-				await report(25, "Preparing the ChatGPT prompt.")
-				before = await self._wait_for_composer()
+				readiness_deadline = time.monotonic() + DEFAULT_READINESS_TIMEOUT_SECONDS
+				try:
+					async with asyncio.timeout(DEFAULT_READINESS_TIMEOUT_SECONDS):
+						await report(5, "Opening the dedicated ChatGPT session.")
+						await self._ensure_session()
+						if new_chat:
+							await report(15, "Opening a fresh ChatGPT conversation.")
+							await self._navigate()
+						await report(25, "Preparing the ChatGPT prompt.")
+						before = await self._wait_for_composer(deadline=readiness_deadline)
+				except TimeoutError:
+					error = ReadinessTimeoutError(
+						f"ChatGPT did not become ready within {DEFAULT_READINESS_TIMEOUT_SECONDS:g} seconds."
+					)
+					await self._raise_readiness_timeout_after_cleanup(error)
+				except ReadinessTimeoutError as error:
+					await self._raise_readiness_timeout_after_cleanup(error)
 				if before.get("streaming"):
 					before = await self._wait_until_idle(timeout_seconds=min(60, timeout_seconds))
 				before_count = int(before.get("assistant_count", 0))
@@ -1073,21 +1137,24 @@ class ChatGPTWebBridge:
 					"The response may complete later; retrieve it with chatgpt_last_response."
 				)
 
+	async def _close_session_unlocked(self) -> None:
+		session = self._session
+		if session is None:
+			if not self._reconnect_blocked:
+				self._release_profile_lock()
+			return
+		self._reconnect_blocked = True
+		try:
+			await session.kill()
+		except asyncio.CancelledError:
+			self._reconnect_blocked = True
+			raise
+		except Exception as exc:
+			self._reconnect_blocked = True
+			raise ChatGPTWebError("The dedicated browser did not shut down cleanly.") from exc
+		if self._session is session:
+			self._finalize_confirmed_shutdown(session)
+
 	async def close(self) -> None:
 		async with self._lock:
-			session = self._session
-			if session is None:
-				if not self._reconnect_blocked:
-					self._release_profile_lock()
-				return
-			self._reconnect_blocked = True
-			try:
-				await session.kill()
-			except asyncio.CancelledError:
-				self._reconnect_blocked = True
-				raise
-			except Exception as exc:
-				self._reconnect_blocked = True
-				raise ChatGPTWebError("The dedicated browser did not shut down cleanly.") from exc
-			if self._session is session:
-				self._finalize_confirmed_shutdown(session)
+			await self._close_session_unlocked()

@@ -25,14 +25,22 @@ they identify the connected service rather than the project display name.
 
 ## Tools
 
-- `chatgpt_status()` opens the dedicated browser and reports `ready`,
-  `login_required`, `challenge`, or `loading`.
+- `chatgpt_status()` opens the dedicated browser and waits internally for the
+  ChatGPT composer to become usable. Transient `loading` is not returned as a
+  final tool result. One 30-second readiness budget starts before browser
+  startup and covers startup, navigation, and page initialization. The call
+  returns `ready`, `login_required`, or `challenge`; if readiness times out
+  before any prompt is sent, the bridge closes the browser and returns a
+  readiness failure. If shutdown also fails, that readiness failure is
+  preserved and reports that session ownership remains uncertain.
 - `chatgpt_close()` closes the dedicated browser session without sending or
   reading conversation content. The MCP registration remains available, and
   the next browser tool call can start a new session.
 - `chatgpt_new_chat()` opens a fresh ChatGPT conversation.
 - `chatgpt_last_response()` reads the latest assistant response without sending
-  another prompt and labels it `in_progress` or `completed`.
+  another prompt and labels it `in_progress` or `completed`. Use it only for
+  bounded recovery after an explicit `chatgpt_ask` timeout, not after an
+  ambiguous non-timeout error.
 - `chatgpt_ask(prompt, new_chat=true, timeout_seconds=600)` sends one prompt,
   reports progress notifications, including a bounded tail of the visible
   response while it is generating, then returns the confirmed final response
@@ -153,7 +161,13 @@ Verification already run: <commands and results>
 
 ### Calling the tools
 
-Check readiness before a review:
+Check readiness once before a review. The bridge owns one 30-second readiness
+budget starting before browser startup and covering navigation plus page
+loading, so callers must not retry a transient loading state themselves.
+Continue only at `ready`. Stop for `login_required` or `challenge` so the user
+can act. A readiness timeout happens before prompt submission; the bridge
+closes the browser before returning it. If shutdown also fails, the readiness
+failure remains visible and session ownership stays uncertain:
 
 ```text
 chatgpt_status()
@@ -177,6 +191,14 @@ response tail (up to 1,200 characters); it lets the calling agent understand
 the current context before the final response arrives. Do not make another
 browser call until `chatgpt_ask` returns. A successful result includes
 `status: "completed"` and confirms that the final answer is ready to use.
+
+If `chatgpt_ask` times out, do not resubmit the prompt. Wait 2-5 seconds between
+bounded `chatgpt_last_response()` polls and accept only `status: "completed"`.
+For any other post-submit error—especially a user-turn, conversation, target,
+or page-change error—response ownership is ambiguous: discard partial tails,
+do not use `chatgpt_last_response()` as advice, do not retry or open a new chat
+automatically, and report the failed review. A new attempt requires explicit
+user direction.
 
 Close the dedicated browser after the review:
 
@@ -333,13 +355,19 @@ ChatGPT/OpenAI ที่จำเป็นสำหรับเว็บไซ�
 
 ### เครื่องมือ
 
-- `chatgpt_status()` เปิด browser เฉพาะและรายงานสถานะ `ready`,
-  `login_required`, `challenge` หรือ `loading`
+- `chatgpt_status()` เปิด browser เฉพาะและรอภายในจนช่องเขียนข้อความพร้อมใช้
+  โดยไม่คืน `loading` ชั่วคราวเป็นผลสุดท้าย มี readiness budget 30 วินาทีหนึ่ง
+  ชุดครอบคลุมการเปิด browser, navigation และ page initialization แล้วคืน
+  `ready`, `login_required` หรือ `challenge` หากหมดเวลาก่อนส่ง prompt bridge
+  จะปิด browser และคืน readiness failure โดยยังรักษาสาเหตุเดิมไว้หากการปิด
+  browser ล้มเหลวด้วย
 - `chatgpt_close()` ปิด browser session โดยไม่ส่งหรืออ่านเนื้อหาการสนทนา การ
   ลงทะเบียน MCP ยังคงอยู่ และการเรียกครั้งถัดไปสามารถเปิด session ใหม่ได้
 - `chatgpt_new_chat()` เปิดบทสนทนา ChatGPT ใหม่
 - `chatgpt_last_response()` อ่านคำตอบล่าสุดโดยไม่ส่ง prompt ใหม่ และระบุสถานะ
-  `in_progress` หรือ `completed`
+  `in_progress` หรือ `completed` ใช้เฉพาะการกู้คืนแบบมีขอบเขตหลัง
+  `chatgpt_ask` timeout อย่างชัดเจน ไม่ใช้หลัง error อื่นที่ระบุเจ้าของ response
+  ไม่ได้
 - `chatgpt_ask(prompt, new_chat=true, timeout_seconds=600)` ส่ง prompt หนึ่ง
   รายการ พร้อมส่ง progress และ tail ของคำตอบที่กำลังสร้าง แล้วคืนคำตอบสุดท้าย
   ที่ยืนยันว่าเสถียรแล้วพร้อม `status: "completed"`
@@ -414,7 +442,12 @@ check อยู่ในส่วนภาษาอังกฤษด้าน�
 
 #### การเรียกเครื่องมือ
 
-ตรวจสอบความพร้อมก่อน review:
+ตรวจสอบความพร้อมหนึ่งครั้งก่อน review โดย bridge เป็นเจ้าของ readiness budget
+30 วินาทีตั้งแต่ก่อนเปิด browser และครอบคลุม navigation กับ page loading ผู้เรียก
+จึงไม่ต้อง poll สถานะ `loading` เอง ให้ทำต่อเฉพาะเมื่อเป็น `ready` และหยุดให้ผู้ใช้
+จัดการเมื่อเป็น `login_required` หรือ `challenge` หาก readiness timeout ก่อนส่ง
+prompt bridge จะปิด browser ก่อนคืนผล และจะรายงาน ownership ที่ไม่แน่นอนหากปิด
+ไม่สำเร็จ:
 
 ```text
 chatgpt_status()
@@ -435,6 +468,13 @@ chatgpt_ask(
 ของข้อความที่มองเห็นได้ (ไม่เกิน 1,200 ตัวอักษร) เพื่อให้ agent เข้าใจบริบท
 ปัจจุบันก่อนคำตอบสุดท้ายมา ห้ามเรียก browser tool อื่นจนกว่า `chatgpt_ask` จะคืน
 ผลสำเร็จ ซึ่งจะมี `status: "completed"` และข้อความยืนยันว่าคำตอบสุดท้ายพร้อมใช้
+
+ถ้า `chatgpt_ask` timeout ห้ามส่ง prompt ซ้ำ ให้เว้น 2-5 วินาทีระหว่างการเรียก
+`chatgpt_last_response()` แบบมีขอบเขต และยอมรับเฉพาะ `status: "completed"`
+สำหรับ error หลังส่ง prompt แบบอื่น โดยเฉพาะ user-turn, conversation, target หรือ
+page-change ให้ถือว่า ownership ของ response ไม่ชัดเจน ทิ้ง partial tail ห้ามใช้
+`chatgpt_last_response()` เป็นคำแนะนำ ห้าม retry หรือเปิด chat ใหม่อัตโนมัติ และ
+รายงานว่า review ไม่สำเร็จ การเริ่มใหม่ต้องได้รับคำสั่งจากผู้ใช้อย่างชัดเจน
 
 ปิด browser เฉพาะหลัง review เสร็จ:
 
@@ -489,7 +529,8 @@ python3.11 -m pip install -r requirements.txt
 2. จะมี Chrome window เฉพาะเปิดขึ้นมา โดยใช้
    `~/.codex-chatgpt/browser-profile`
 3. ลงชื่อเข้าใช้ ChatGPT ด้วยตนเอง ห้ามส่ง credentials ให้ Codex หรือ tool
-4. เรียก `chatgpt_status` อีกครั้งจนสถานะเป็น `ready`
+4. หลังลงชื่อเข้าใช้แล้ว เรียก `chatgpt_status` อีกหนึ่งครั้งและรอผลสุดท้าย
+   ซึ่งควรเป็น `ready`
 
 เปลี่ยนตำแหน่ง profile ได้เมื่อจำเป็น:
 

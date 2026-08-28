@@ -47,7 +47,13 @@ def _internal_error_result() -> dict[str, object]:
 
 @mcp.tool()
 async def chatgpt_status() -> dict[str, object]:
-	"""Open the dedicated browser if needed and report whether ChatGPT Web is ready."""
+	"""Open ChatGPT and wait for one final readiness result.
+
+	Use once before chatgpt_ask. Wait for this call; the bridge owns the bounded
+	readiness loop and never returns transient ``loading``. Continue only at
+	``ready``; ``login_required`` or ``challenge`` needs user action. Do not call
+	any browser tool while chatgpt_ask is waiting.
+	"""
 
 	try:
 		return await bridge.status()
@@ -59,7 +65,11 @@ async def chatgpt_status() -> dict[str, object]:
 
 @mcp.tool()
 async def chatgpt_close() -> dict[str, object]:
-	"""Close the dedicated ChatGPT browser session without sending a prompt."""
+	"""Close ChatGPT after tool work or an already returned failure.
+
+	Never close while chatgpt_ask is waiting. Finish any allowed timeout recovery
+	first; cancellation after submission is not a rollback.
+	"""
 
 	try:
 		await bridge.close()
@@ -72,7 +82,11 @@ async def chatgpt_close() -> dict[str, object]:
 
 @mcp.tool()
 async def chatgpt_new_chat() -> dict[str, object]:
-	"""Navigate the dedicated browser profile to a fresh ChatGPT conversation."""
+	"""Open a fresh conversation when no chatgpt_ask call is running.
+
+	For a normal independent request, prefer ``chatgpt_ask(new_chat=True)``.
+	Never use a new chat to hide or recover an ambiguous post-submit error.
+	"""
 
 	try:
 		return await bridge.new_chat()
@@ -84,7 +98,12 @@ async def chatgpt_new_chat() -> dict[str, object]:
 
 @mcp.tool()
 async def chatgpt_last_response() -> dict[str, object]:
-	"""Return the latest ChatGPT response and whether it is still generating or completed."""
+	"""Read the latest response after chatgpt_ask explicitly times out.
+
+	Do not resend the prompt. ``in_progress`` is provisional; accept only
+	``completed``. Do not use this after an ambiguous non-timeout error because
+	the latest response may belong to another turn.
+	"""
 
 	try:
 		return await bridge.last_response()
@@ -101,17 +120,15 @@ async def chatgpt_ask(
 	timeout_seconds: int = 600,
 	ctx: Context = None,  # type: ignore[assignment]
 ) -> dict[str, object]:
-	"""Send one prompt to ChatGPT Web and return its completed response.
+	"""Send one prompt and wait for its confirmed final response.
 
-	After the prompt is submitted, wait for this call to complete or time out;
-	do not send another prompt, start a new chat, close the browser, or read the
-	latest response while this call is waiting. While the MCP client supports
-	progress notifications, it receives lifecycle updates such as "waiting",
-	"generating", and "finalizing". While ChatGPT generates, updates include a
-	bounded tail of the visible response so the calling agent has current context.
-	On success, this tool returns status="completed" and explicitly confirms that
-	the final response is ready. A timeout does not mean the
-	response failed: call chatgpt_last_response once after a timeout.
+	Use after chatgpt_status returns ``ready``. Do not send another prompt or call
+	another browser tool while waiting. Progress notifications and response tails
+	are context, not final advice. Accept only ``ok=true`` with
+	``status="completed"``. After a timeout, recover with chatgpt_last_response
+	without resending. After any
+	ambiguous non-timeout error, discard partial output and do not retry; a new
+	attempt requires explicit user direction.
 
 	Args:
 		prompt: Text to send. Content is not written to logs.
