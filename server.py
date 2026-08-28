@@ -98,6 +98,11 @@ async def chatgpt_last_response() -> dict[str, object]:
 async def chatgpt_ask(prompt: str, new_chat: bool = True, timeout_seconds: int = 600) -> dict[str, object]:
 	"""Send one prompt to ChatGPT Web and return its completed response.
 
+	After the prompt is submitted, wait for this call to complete or time out;
+	do not send another prompt, start a new chat, close the browser, or read the
+	latest response while this call is waiting. A timeout does not mean the
+	response failed: call chatgpt_last_response once after a timeout.
+
 	Args:
 		prompt: Text to send. Content is not written to logs.
 		new_chat: Start from a fresh conversation before sending.

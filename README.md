@@ -69,7 +69,7 @@ ambiguous turn fails closed.
 This MCP is directional: Codex can call ChatGPT Web, but ChatGPT Web cannot call
 back through this server to read arbitrary local paths. ChatGPT Web may still
 have a separate user-installed local connector, such as
-`ENDEAVOR_AGENT_CHATGPT`; that is an independent tool route with its own access
+`Endeavor_Hands`; that is an independent tool route with its own access
 policy. Reviews that use such a connector can take several minutes, so keep the
 default 600-second timeout or raise it to at most 900 seconds when necessary.
 
@@ -360,7 +360,7 @@ assistant response ใหม่ หากมีการแก้ไขด้ว
 
 MCP นี้เป็น directional: Codex เรียก ChatGPT Web ได้ แต่ ChatGPT Web เรียกกลับ
 ผ่าน server นี้เพื่ออ่าน path ในเครื่องแบบ arbitrary ไม่ได้ หากผู้ใช้ติดตั้ง
-connector แยก เช่น `ENDEAVOR_AGENT_CHATGPT` นั่นเป็นเส้นทางคนละตัวและมีนโยบาย
+connector แยก เช่น `Endeavor_Hands` นั่นเป็นเส้นทางคนละตัวและมีนโยบาย
 การเข้าถึงของตัวเอง การ review ที่ใช้ connector ดังกล่าวอาจใช้เวลาหลายนาที จึง
 ควรใช้ timeout เริ่มต้น 600 วินาที หรือเพิ่มได้ไม่เกิน 900 วินาทีเมื่อจำเป็น
 
