@@ -80,18 +80,19 @@ wait for explicit cleanup.
 
 Before sending, `chatgpt_ask` verifies the visible composer still contains the
 exact normalized prompt in the same guarded runtime evaluation that clicks Send.
-After sending, it requires exactly one new user turn. Normalization changes
+After sending, it requires exactly one new user turn whose latest text matches
+that prompt before accepting a new assistant response. Normalization changes
 only line endings and ChatGPT's NBSP representation; indentation, repeated
-spaces, tabs, blank lines, and line boundaries remain significant. Explicitly
-observed inline-code and paired fenced-code presentation transformations are
-modeled for exact correlation. If rendered text still differs, the default
-structural ownership fallback continues because the bridge already verified the
-exact composer atomically before clicking Send and still requires the bound
-conversation, document, browser target, and exact user-turn count. General
-fuzzy similarity is never used. The result includes structural, content-free
-mismatch metadata in `correlation_warning`. Set `strict_user_turn_text=true` to
-make post-submit rendered text a hard gate. Count, conversation, document, and
-target mismatches always fail closed.
+spaces, tabs, blank lines, and line boundaries remain significant. The only
+additional exact forms are explicitly observed inline-code and paired
+fenced-code presentation transformations. If rendered text still differs, the
+default structural ownership fallback continues only because the bridge already
+verified the exact composer atomically before clicking Send and still requires
+exactly one new user turn plus the bound conversation, document, and browser
+target. General fuzzy similarity is never used. The result reports structural,
+content-free mismatch metadata in `correlation_warning`. Count, conversation,
+document, and target mismatches always fail closed. Set
+`strict_user_turn_text=true` to make post-submit rendered text a hard gate.
 
 This MCP is directional: Codex can call ChatGPT Web, but ChatGPT Web cannot call
 back through this server to read arbitrary local paths. ChatGPT Web may still
@@ -434,12 +435,17 @@ process การยกเลิกหลังส่ง prompt แล้วไ�
 
 ก่อนส่ง `chatgpt_ask` จะตรวจว่า composer ที่มองเห็นมี prompt ที่ normalize แล้ว
 ตรงกันทุกตัวอักษรใน runtime evaluation เดียวกับการคลิก Send หลังส่งจะต้องพบ
-user turn ใหม่เพียงหนึ่งรายการ และยังต้องเป็น conversation, document และ browser
-target ที่ผูกกับ operation เดิม การ match ข้อความที่ UI render เป็น advisory
-โดยค่าเริ่มต้น หากข้อความต่าง ระบบจะรอคำตอบต่อและคืน structural metadata ที่ไม่
-เปิดเผยเนื้อหาใน `correlation_warning` ระบบไม่ใช้ fuzzy similarity ส่วน count,
-conversation, document และ target mismatch ยังคง fail closed เสมอ หากต้องการ
-ให้ rendered text เป็น hard gate ให้ตั้ง `strict_user_turn_text=true`
+user turn ใหม่เพียงหนึ่งรายการ โดยข้อความล่าสุดต้องตรงกับ prompt ที่ส่งก่อนรับ
+assistant response การ normalize เปลี่ยนเฉพาะ line ending และ NBSP ของ ChatGPT
+ส่วน indentation, repeated spaces, tabs, blank lines และ line boundaries ยังคงมี
+ความหมาย การแสดงผล inline-code และ paired fenced-code ที่ยืนยันแล้วเท่านั้นจึง
+ถือเป็นรูปแบบ exact ที่เทียบได้ หากข้อความที่ UI render ยังต่าง ระบบจะใช้
+structural ownership fallback ได้เฉพาะเมื่อ bridge ตรวจ composer แบบ atomic ก่อน
+คลิก Send แล้ว และยังตรวจ conversation, document, browser target และจำนวน
+user turn อย่างเข้มงวด ระบบไม่ใช้ fuzzy similarity และคืน structural metadata ที่
+ไม่เปิดเผยเนื้อหาใน `correlation_warning` ส่วน count, conversation, document และ
+target mismatch ยังคง fail closed เสมอ หากต้องการให้ rendered text เป็น hard gate
+ให้ตั้ง `strict_user_turn_text=true`
 
 MCP นี้เป็น directional: Codex เรียก ChatGPT Web ได้ แต่ ChatGPT Web เรียกกลับ
 ผ่าน server นี้เพื่ออ่าน path ในเครื่องแบบ arbitrary ไม่ได้ หากผู้ใช้ติดตั้ง
