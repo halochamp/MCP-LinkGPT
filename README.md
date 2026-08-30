@@ -124,6 +124,38 @@ advisor, not as the autonomous implementation worker. The normal hand-off is:
 5. The calling agent implements only the changes that are in scope, runs the
    relevant tests, and reports the result.
 
+### Advisor checkpoints
+
+Once the user has requested LinkGPT, use these checkpoints as an ordered
+decision rule. Advisor use should be **evidence-triggered, not reflexive**:
+perform the smallest direct local check that could settle the doubt first. If
+that check resolves the issue, continue locally. If material uncertainty
+remains, consult ChatGPT before guessing or expanding the change.
+
+1. **Before implementation — consult when the plan itself is uncertain.** Use
+   LinkGPT after one local evidence pass when two or more plausible approaches
+   remain with non-obvious trade-offs, when an unfamiliar lifecycle/API
+   contract is material to correctness, or when the calling agent cannot state
+   how the proposed fix will be falsified. Do not call merely to confirm an
+   obvious mechanical edit.
+2. **Mid-work — consult when new evidence weakens the current plan.** Pause
+   before another material change when a targeted test contradicts the current
+   hypothesis, the first fix fails and the next step depends on a new unproven
+   hypothesis, scope unexpectedly expands across a high-risk boundary, two
+   reasonable next fixes remain after one direct check, or local evidence is
+   still internally inconsistent.
+3. **Before completion — use a closure audit when the user requested an audit
+   workflow or when the task needs one.** Ask ChatGPT to try to falsify the
+   implemented result, identify residual risks, and name the smallest missing
+   validation. Earlier consultations do not replace this closure check when a
+   final audit is part of the requested workflow.
+
+Do not chain advisor calls without local work between them. Every follow-up must
+carry new evidence, updated code/diff, or a concrete unresolved question. If two
+consecutive advisor turns on the same issue do not reduce uncertainty, stop the
+loop, narrow or re-frame the question from local evidence, or ask the user for
+direction instead of repeatedly consulting.
+
 ### Choosing `new_chat`
 
 Use `new_chat=true` when:
@@ -151,8 +183,10 @@ For a normal fix-and-recheck loop, keep the same conversation:
 6. After all findings are closed, use `new_chat=true` only if the user requests, or the task requires, a final independent audit.
 
 Even with `new_chat=false`, always include the actual updated code or diff inline.
-Conversation history supplies the previous reasoning, not the new code. Never ask
-ChatGPT to fetch local files or infer changes from file paths alone.
+Conversation history supplies the previous reasoning, not the new code. Reuse the
+same conversation for mid-work questions, fix-and-recheck turns, and closure
+audits that concern the same issue/review thread. Never ask ChatGPT to fetch
+local files or infer changes from file paths alone.
 
 If the response is still running after the timeout, call `chatgpt_last_response()`
 instead of submitting the prompt again. Its returned status distinguishes a
@@ -247,7 +281,10 @@ confirming stability. While generating, an update includes the latest visible
 response tail (up to 1,200 characters); it lets the calling agent understand
 the current context before the final response arrives. Do not make another
 browser call until `chatgpt_ask` returns. A successful result includes
-`status: "completed"` and confirms that the final answer is ready to use.
+`status: "completed"` and confirms that the final answer is ready to use. Keep
+the dedicated browser open while the same issue/review thread is active so
+`new_chat=false` follow-ups retain the intended conversation. Close it after
+the closure audit, exhausted recovery, or an abandoned review thread.
 When `correlation_status` is `rendering_fallback`, retain and disclose its
 `correlation_warning` when the distinction matters; do not represent it as an
 exactly correlated answer.
@@ -513,6 +550,34 @@ review ที่กำลังดำเนินอยู่ ไม่ควร
 4. agent ตรวจสอบ claim ที่สำคัญทุกข้อกับ codebase จริง
 5. agent แก้เฉพาะสิ่งที่อยู่ในขอบเขต รันทดสอบที่เกี่ยวข้อง และรายงานผล
 
+#### Advisor checkpoints
+
+เมื่อผู้ใช้สั่งให้ใช้ LinkGPT แล้ว ให้ใช้ checkpoints ต่อไปนี้เป็น decision rule
+ตามลำดับ การเรียก advisor ควรเป็นแบบ **evidence-triggered ไม่ใช่ reflexive**:
+ทำ direct local check ที่เล็กที่สุดซึ่งอาจตอบข้อสงสัยได้ก่อน ถ้าตรวจแล้วจบให้ทำ
+ต่อในเครื่องได้เลย แต่ถ้ายังมี material uncertainty ให้ถาม ChatGPT ก่อนเดาหรือ
+ขยายการแก้ไข
+
+1. **ก่อน implementation — ถ้าแผนเองยังไม่ชัดให้ consult ก่อน** หลัง local
+   evidence pass หนึ่งรอบ หากยังมีอย่างน้อยสองแนวทางที่สมเหตุผลและมี trade-off
+   ไม่ชัด, มี lifecycle/API contract ที่ไม่คุ้นเคยแต่มีผลต่อ correctness หรือ agent
+   ยังอธิบายไม่ได้ว่าจะ falsify fix ที่เสนออย่างไร ให้เรียก LinkGPT ไม่ต้องเรียก
+   เพียงเพื่อยืนยัน mechanical edit ที่ชัดเจนอยู่แล้ว
+2. **กลางงาน — ถ้า evidence ใหม่ทำให้แผนเดิมอ่อนลงให้หยุดถามก่อนแก้ต่อ** เช่น
+   targeted test สวนกับ hypothesis เดิม, fix แรกไม่หายและก้าวถัดไปต้องพึ่ง
+   hypothesis ใหม่ที่ยังไม่พิสูจน์, scope ขยายไปยัง high-risk boundary อย่างไม่
+   คาดคิด, ยังเหลือสองแนวทางที่สมเหตุผลหลัง direct check หนึ่งครั้ง หรือ evidence
+   ในเครื่องยังขัดกันเอง
+3. **ก่อนปิดงาน — ใช้ closure audit เมื่อผู้ใช้สั่ง audit workflow หรือเมื่องาน
+   ต้องการ final audit** ให้ ChatGPT พยายาม falsify ผลที่แก้แล้ว หา residual risk
+   และระบุ validation ที่ยังขาดให้น้อยที่สุด การ consult ก่อนหน้านี้ไม่แทน closure
+   check ถ้า final audit เป็นส่วนหนึ่งของ workflow ที่ผู้ใช้ร้องขอ
+
+ห้าม chain advisor calls โดยไม่มี local work คั่นกลาง ทุก follow-up ต้องมี evidence
+ใหม่, updated code/diff หรือ unresolved question ที่ชัดเจน หาก advisor สองรอบติด
+ใน issue เดิมยังไม่ลด uncertainty ให้หยุด loop แล้ว narrow/re-frame คำถามจาก
+หลักฐานในเครื่อง หรือถามผู้ใช้แทนการ consult ซ้ำไปเรื่อย ๆ
+
 #### การเลือก `new_chat`
 
 ใช้ `new_chat=true` เมื่อ:
@@ -540,8 +605,10 @@ review ที่กำลังดำเนินอยู่ ไม่ควร
 6. หลังปิด findings หมดแล้ว ใช้ `new_chat=true` อีกครั้งเฉพาะเมื่อผู้ใช้สั่ง หรือเมื่องานต้องการ final independent audit
 
 แม้ใช้ `new_chat=false` ก็ต้องแนบ actual updated code หรือ diff ล่าสุด inline เสมอ
-conversation history มี reasoning เดิม แต่ไม่ได้มีโค้ดเวอร์ชันใหม่ ห้ามขอให้ ChatGPT
-ไปอ่าน local file เองหรืออนุมานการเปลี่ยนแปลงจาก file path เท่านั้น
+conversation history มี reasoning เดิม แต่ไม่ได้มีโค้ดเวอร์ชันใหม่ ให้ reuse
+conversation เดิมสำหรับ mid-work question, fix-and-recheck และ closure audit ที่ยัง
+เป็น issue/review thread เดิม ห้ามขอให้ ChatGPT ไปอ่าน local file เองหรืออนุมาน
+การเปลี่ยนแปลงจาก file path เท่านั้น
 
 หากหมดเวลาแต่ response ยังทำงานอยู่ ให้เรียก `chatgpt_last_response()` แทนการส่ง
 prompt ซ้ำ สถานะที่คืนมาจะบอกว่า response ยังทำงานอยู่หรือเสร็จแล้ว
@@ -595,6 +662,9 @@ chatgpt_ask(
 ของข้อความที่มองเห็นได้ (ไม่เกิน 1,200 ตัวอักษร) เพื่อให้ agent เข้าใจบริบท
 ปัจจุบันก่อนคำตอบสุดท้ายมา ห้ามเรียก browser tool อื่นจนกว่า `chatgpt_ask` จะคืน
 ผลสำเร็จ ซึ่งจะมี `status: "completed"` และข้อความยืนยันว่าคำตอบสุดท้ายพร้อมใช้
+ให้คง dedicated browser เปิดไว้ตราบใดที่ issue/review thread เดิมยังทำงานอยู่ เพื่อ
+ให้ follow-up ด้วย `new_chat=false` ใช้ conversation เดิมได้ แล้วค่อยปิดหลัง
+closure audit, recovery budget หมด หรือ abandon review thread
 หากมี `correlation_status: "rendering_fallback"` ให้เก็บและแจ้ง
 `correlation_warning` เมื่อความแตกต่างมีผลต่อการตัดสินใจ และไม่ควรกล่าวว่าเป็น
 คำตอบที่ correlate กับ rendered text แบบ exact
