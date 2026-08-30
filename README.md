@@ -101,21 +101,60 @@ have a separate user-installed local connector, such as
 policy. Reviews that use such a connector can take several minutes, so keep the
 default 600-second timeout or raise it to at most 900 seconds when necessary.
 
-## Review and advisory workflow
+## LinkGPT review and advisory workflow
 
-Use this tool for an independent critique, not for autonomous implementation.
-The normal hand-off is:
+### When to invoke LinkGPT
 
-1. Codex reads the relevant files, diff, test output, and project rules.
-2. Codex sends ChatGPT a focused prompt with the necessary context.
+This is a **user-triggered workflow**. The calling agent should use MCP-LinkGPT
+when the user explicitly asks to use LinkGPT, consult ChatGPT, get a ChatGPT
+second opinion, run an audit/review through ChatGPT Web, or continue a LinkGPT
+review already in progress. Do not invoke LinkGPT merely because a task could
+benefit from another opinion.
+
+Once the user has requested LinkGPT, use it as a read-only reviewer or senior
+advisor, not as the autonomous implementation worker. The normal hand-off is:
+
+1. The calling agent reads the relevant files, diff, test output, and project
+   rules, then puts the actual code/diff and necessary evidence inline in the
+   prompt.
+2. The calling agent sends ChatGPT a focused prompt; paths and line anchors are
+   provenance only and never substitute for the inline evidence.
 3. ChatGPT returns findings, risks, alternatives, or a recommended decision.
-4. Codex validates every material claim against the local codebase.
-5. Codex implements only the changes that are in scope, then runs the relevant
-   tests and reports the result.
+4. The calling agent validates every material claim against the real codebase.
+5. The calling agent implements only the changes that are in scope, runs the
+   relevant tests, and reports the result.
 
-Start a fresh chat for an independent review (`new_chat=true`). Use
-`new_chat=false` only to ask a narrow follow-up about the same evidence. If the
-response is still running after the timeout, call `chatgpt_last_response()`
+### Choosing `new_chat`
+
+Use `new_chat=true` when:
+
+- starting an independent review;
+- reviewing unrelated evidence;
+- intentionally requesting a fresh opinion that must not depend on the previous answer;
+- the user says `independent`, `fresh audit`, `from scratch`, or equivalent wording.
+
+Use `new_chat=false` when:
+
+- asking a follow-up about the immediately preceding review;
+- verifying that a previous finding has been fixed;
+- providing updated code or a diff for the same issue;
+- asking ChatGPT to reconsider, clarify, or re-audit its previous finding;
+- the prompt refers to `your previous finding`, `the previous audit`, `fixed X`, `re-audit this fix`, or equivalent wording.
+
+For a normal fix-and-recheck loop, keep the same conversation:
+
+1. Initial audit: call `chatgpt_ask(..., new_chat=true)`.
+2. ChatGPT reports finding X.
+3. Fix X locally.
+4. Recheck the fix with `chatgpt_ask(prompt="<finding X was fixed + actual updated code/diff inline>", new_chat=false)`.
+5. Repeat steps 2-4 while closing findings from that same review.
+6. After all findings are closed, use `new_chat=true` only if the user requests, or the task requires, a final independent audit.
+
+Even with `new_chat=false`, always include the actual updated code or diff inline.
+Conversation history supplies the previous reasoning, not the new code. Never ask
+ChatGPT to fetch local files or infer changes from file paths alone.
+
+If the response is still running after the timeout, call `chatgpt_last_response()`
 instead of submitting the prompt again. Its returned status distinguishes a
 still-running response from a completed one.
 
@@ -453,20 +492,59 @@ connector แยก เช่น `Endeavor_Hands` นั่นเป็นเส
 การเข้าถึงของตัวเอง การ review ที่ใช้ connector ดังกล่าวอาจใช้เวลาหลายนาที จึง
 ควรใช้ timeout เริ่มต้น 600 วินาที หรือเพิ่มได้ไม่เกิน 900 วินาทีเมื่อจำเป็น
 
-### ขั้นตอนการ review และให้คำปรึกษา
+### LinkGPT workflow สำหรับ review และให้คำปรึกษา
 
-ใช้เครื่องมือนี้เพื่อขอคำวิจารณ์อิสระ ไม่ใช่เพื่อให้ทำงานแทนแบบ autonomous:
+#### เมื่อใดจึงควรเรียก LinkGPT
 
-1. Codex อ่านไฟล์ diff ผลทดสอบ และกฎของโปรเจกต์ที่เกี่ยวข้อง
-2. Codex ส่ง prompt ที่มีบริบทจำเป็นไปยัง ChatGPT
+workflow นี้ทำงาน **เมื่อผู้ใช้สั่ง** ให้ใช้ LinkGPT เท่านั้น ตัว agent ควรเรียก
+MCP-LinkGPT เมื่อผู้ใช้ระบุชัดเจนว่าให้ใช้ LinkGPT, ให้ปรึกษา ChatGPT, ขอ second
+opinion จาก ChatGPT, ให้ audit/review ผ่าน ChatGPT Web หรือให้ทำต่อจาก LinkGPT
+review ที่กำลังดำเนินอยู่ ไม่ควรเรียก LinkGPT เองเพียงเพราะคิดว่างานอาจได้
+ประโยชน์จากความเห็นเพิ่มเติม
+
+เมื่อผู้ใช้สั่งให้ใช้ LinkGPT แล้ว ให้ใช้ ChatGPT เป็น reviewer หรือ senior advisor
+แบบ read-only ไม่ใช่ worker ที่แก้โค้ดแทน ขั้นตอนปกติคือ:
+
+1. agent ที่เรียกอ่านไฟล์ diff ผลทดสอบ และกฎของโปรเจกต์ที่เกี่ยวข้อง แล้วใส่
+   actual code/diff และหลักฐานที่จำเป็นลงใน prompt โดยตรง
+2. agent ส่ง focused prompt ไปยัง ChatGPT โดย path และ line anchor ใช้เป็น
+   provenance เท่านั้น ไม่ใช้แทนหลักฐานที่ต้องแนบ inline
 3. ChatGPT ส่ง findings, ความเสี่ยง ทางเลือก หรือคำแนะนำกลับมา
-4. Codex ตรวจสอบ claim ที่สำคัญทุกข้อกับ codebase จริง
-5. Codex แก้เฉพาะสิ่งที่อยู่ในขอบเขต แล้วรันทดสอบและรายงานผล
+4. agent ตรวจสอบ claim ที่สำคัญทุกข้อกับ codebase จริง
+5. agent แก้เฉพาะสิ่งที่อยู่ในขอบเขต รันทดสอบที่เกี่ยวข้อง และรายงานผล
 
-สำหรับ review อิสระให้เริ่มแชตใหม่ด้วย `new_chat=true` ใช้ `new_chat=false` เฉพาะ
-การถามต่อในหลักฐานชุดเดิม หากหมดเวลาแต่ response ยังทำงานอยู่ ให้เรียก
-`chatgpt_last_response()` แทนการส่ง prompt ซ้ำ สถานะที่คืนมาจะบอกว่า response
-ยังทำงานอยู่หรือเสร็จแล้ว
+#### การเลือก `new_chat`
+
+ใช้ `new_chat=true` เมื่อ:
+
+- เริ่ม independent review ใหม่;
+- review หลักฐานคนละชุดหรือคนละเรื่อง;
+- ต้องการ fresh opinion ที่ไม่ควรอิงคำตอบก่อนหน้า;
+- ผู้ใช้ระบุคำว่า `independent`, `fresh audit`, `from scratch` หรือความหมายเทียบเท่า
+
+ใช้ `new_chat=false` เมื่อ:
+
+- ถาม follow-up จาก review ก่อนหน้าทันที;
+- ตรวจว่าการแก้ previous finding ปิดปัญหาแล้วหรือยัง;
+- ส่ง code/diff เวอร์ชันใหม่ของ issue เดิมให้ตรวจซ้ำ;
+- ขอให้ ChatGPT reconsider, clarify หรือ re-audit finding เดิม;
+- prompt อ้างถึง `your previous finding`, `the previous audit`, `fixed X`, `re-audit this fix` หรือความหมายเทียบเท่า
+
+สำหรับ fix-and-recheck loop ปกติ ให้คง conversation เดิม:
+
+1. Initial audit: เรียก `chatgpt_ask(..., new_chat=true)`
+2. ChatGPT รายงาน finding X
+3. แก้ X ในเครื่อง
+4. ตรวจซ้ำด้วย `chatgpt_ask(prompt="<finding X was fixed + actual updated code/diff inline>", new_chat=false)`
+5. ทำข้อ 2-4 ซ้ำจนปิด findings จาก review ชุดนั้น
+6. หลังปิด findings หมดแล้ว ใช้ `new_chat=true` อีกครั้งเฉพาะเมื่อผู้ใช้สั่ง หรือเมื่องานต้องการ final independent audit
+
+แม้ใช้ `new_chat=false` ก็ต้องแนบ actual updated code หรือ diff ล่าสุด inline เสมอ
+conversation history มี reasoning เดิม แต่ไม่ได้มีโค้ดเวอร์ชันใหม่ ห้ามขอให้ ChatGPT
+ไปอ่าน local file เองหรืออนุมานการเปลี่ยนแปลงจาก file path เท่านั้น
+
+หากหมดเวลาแต่ response ยังทำงานอยู่ ให้เรียก `chatgpt_last_response()` แทนการส่ง
+prompt ซ้ำ สถานะที่คืนมาจะบอกว่า response ยังทำงานอยู่หรือเสร็จแล้ว
 
 #### สัญญาการ review
 
