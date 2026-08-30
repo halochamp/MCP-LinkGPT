@@ -2,6 +2,8 @@
 
 [English](#english) | [ภาษาไทย](#ภาษาไทย)
 
+Agent working directly in this repository: start with [`AGENT.md`](AGENT.md) for the quick workflow and [`AGENT_PROCEDURE.md`](AGENT_PROCEDURE.md) for the complete operating procedure. Project-specific hard constraints are in [`CLAUDE.md`](CLAUDE.md).
+
 ## English
 
 `MCP-LinkGPT` is a small local MCP server that lets Codex explicitly consult
